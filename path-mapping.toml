@@ -1,0 +1,23 @@
+[paths.projectfiles]
+windows = 'D:\ProjectFiles'
+macos = "/Users/yiqin/Documents/ProjectFiles"
+
+[paths.pythonprojects]
+windows = 'D:\PythonProjects'
+macos = "/Users/yiqin/Documents/PythonProjects"
+
+[paths.latex]
+windows = 'E:\LaTeX'
+macos = "/Users/yiqin/Documents/LatexDocuments"
+
+[paths.note]
+windows = 'E:\Note'
+macos = "/Users/yiqin/Documents/Note"
+
+[paths.codex]
+windows = 'C:\Users\Yenoc\Documents\Codex'
+macos = "/Users/yiqin/Documents/Codex"
+
+[paths.downloads]
+windows = 'C:\Users\Yenoc\Downloads'
+macos = "/Users/yiqin/Downloads"

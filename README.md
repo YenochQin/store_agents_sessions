@@ -19,7 +19,7 @@ Only conversation files are backed up -- the scripts intentionally skip the rest
 | `Merge-CodexSessionIndex.ps1` | Append missing index entries without overwriting |
 | `Compress-CodexChatBackups.ps1` | Zip backup folders older than N days |
 | `codex-chat.nu` | Nushell equivalent with `backup`, `restore`, `merge-index`, `remap-paths`, `compress` subcommands |
-| `path-mapping.jsonl` | Path mapping config for cross-platform migration |
+| `path-mapping.toml` | Path mapping config for cross-platform migration |
 
 ## Quick Start
 
@@ -84,21 +84,30 @@ A safety backup (`before-restore-*`) is always created before any restore operat
 
 Session files store the project path (`cwd`) from the originating machine. When migrating between macOS and Windows (or vice versa), the Codex app won't display restored conversations because the paths don't match.
 
-The `restore` command automatically remaps paths after restoring if `path-mapping.jsonl` exists alongside the script. You can also run `remap-paths` manually at any time.
+The Nushell `restore` command automatically remaps paths after restoring if `path-mapping.toml` exists alongside the script. You can also run `remap-paths` manually at any time.
 
 ### 1. Configure path mappings
 
-Edit `path-mapping.jsonl` (one JSON object per line):
+Edit `path-mapping.toml`. Each `[paths.<name>]` table describes the same path
+prefix on each machine:
 
-```jsonl
-{"from":"/Users/yiqin/Documents/ProjectFiles","to":"D:\\ProjectFiles"}
-{"from":"/Users/yiqin/Documents/PythonProjects","to":"D:\\PythonProjects"}
+```toml
+[paths.projectfiles]
+windows = 'D:\ProjectFiles'
+macos = "/Users/yiqin/Documents/ProjectFiles"
+
+[paths.pythonprojects]
+windows = 'D:\PythonProjects'
+macos = "/Users/yiqin/Documents/PythonProjects"
 ```
 
-- `from`: the source machine path prefix
-- `to`: the corresponding path on the target machine
+- The current OS decides the target path automatically.
+- On Windows, macOS/Linux paths are mapped to `windows`.
+- On macOS, Windows/Linux paths are mapped to `macos`.
 - Longest prefix matches first
-- Remove lines for paths with no local equivalent (those sessions keep their original paths)
+- You may also add `linux` when needed.
+- Remove platform keys with no local equivalent; those sessions keep their original paths.
+- Windows paths should use TOML single-quoted strings so backslashes do not need escaping.
 
 ### 2. Run manually (optional)
 
@@ -112,8 +121,11 @@ nu codex-chat.nu remap-paths --dry-run
 nu codex-chat.nu remap-paths
 
 # Use a custom mapping file
-nu codex-chat.nu remap-paths --mapping-file /path/to/mapping.jsonl
+nu codex-chat.nu remap-paths --mapping-file /path/to/path-mapping.toml
 ```
+
+Legacy JSONL mappings are still accepted when passed explicitly with
+`--mapping-file`.
 
 ### Full migration workflow
 
@@ -123,7 +135,7 @@ nu codex-chat.nu backup --zip
 
 # Transfer the zip via OneDrive / Dropbox / Syncthing / USB
 
-# On target machine: restore (auto-remaps if path-mapping.jsonl exists)
+# On target machine: restore (auto-remaps if path-mapping.toml exists)
 nu codex-chat.nu restore --backup-path ./codex-chat-sync/YYYYMMDD-HHMMSS.zip --replace-folders
 
 # Restart Codex App

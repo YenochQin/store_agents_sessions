@@ -24,6 +24,17 @@ def default-sync-root [] {
     join-path [(script-dir) $SYNC_DIR_NAME]
 }
 
+def default-path-mapping-file [] {
+    let toml = (join-path [(script-dir) "path-mapping.toml"])
+    let jsonl = (join-path [(script-dir) "path-mapping.jsonl"])
+
+    if ($toml | path exists) {
+        $toml
+    } else {
+        $jsonl
+    }
+}
+
 def codex-running [] {
     (ps | where { |process| ($process.name | str downcase) =~ "codex" } | length) > 0
 }
@@ -204,13 +215,13 @@ def find-jsonl-files [dir: string] {
 def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
     let mappings = (load-path-mappings $mapping_file)
 
-    let invalid = ($mappings | where { |m| ($m.to | str starts-with "FILL_IN") })
+    let invalid = ($mappings | where { |m| ($m.to | str starts-with "FILL_IN") or ($m.from | str starts-with "FILL_IN") })
     if ($invalid | length) > 0 {
-        print "The following mappings have placeholder 'to' values that must be filled in:"
+        print "The following mappings have placeholder values that must be filled in:"
         for m in $invalid {
             print $"  ($m.from) -> ($m.to)"
         }
-        error make { msg: "Edit path-mapping.jsonl and replace FILL_IN_WINDOWS_PATH entries before running." }
+        error make { msg: "Edit the path mapping file and replace FILL_IN placeholder entries before running." }
     }
 
     let sessions_dir = (join-path [$codex_home "sessions"])
@@ -253,16 +264,91 @@ def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
 def load-path-mappings [mapping_file: string] {
     assert-path $mapping_file "path mapping file"
 
-    let lines = (read-jsonl-lines $mapping_file)
-    let mappings = ($lines | each { |line| $line | from json })
+    let mappings = (read-path-mapping-records $mapping_file)
+    let target_platform = (current-path-platform)
+    let platform_keys = ["macos" "windows" "linux"]
+    mut normalized = []
 
     for mapping in $mappings {
-        if not ("from" in $mapping) or not ("to" in $mapping) {
-            error make { msg: $"Invalid mapping entry (missing 'from' or 'to'): ($mapping)" }
+        if ("from" in $mapping) and ("to" in $mapping) {
+            $normalized = ($normalized | append { from: $mapping.from, to: $mapping.to, target_platform: $target_platform })
+            continue
+        }
+
+        let target = (get-record-value $mapping $target_platform)
+        if ($target == null) or (($target | into string | is-empty)) {
+            continue
+        }
+
+        for source_platform in $platform_keys {
+            if $source_platform == $target_platform {
+                continue
+            }
+
+            let source = (get-record-value $mapping $source_platform)
+            if ($source == null) or (($source | into string | is-empty)) {
+                continue
+            }
+
+            $normalized = ($normalized | append {
+                from: ($source | into string)
+                to: ($target | into string)
+                target_platform: $target_platform
+            })
         }
     }
 
-    $mappings | sort-by { |m| -($m.from | str length) }
+    if ($normalized | length) == 0 {
+        error make { msg: $"No usable mappings for current platform: ($target_platform)" }
+    }
+
+    $normalized | sort-by { |m| -($m.from | str length) }
+}
+
+def read-path-mapping-records [mapping_file: string] {
+    let extension = ($mapping_file | path parse | get extension | str downcase)
+
+    if $extension == "toml" {
+        let data = (open $mapping_file)
+        let paths = (get-record-value $data "paths")
+
+        if $paths == null {
+            error make { msg: $"TOML mapping file must contain a [paths.*] table: ($mapping_file)" }
+        }
+
+        $paths | transpose name mapping | each { |entry| $entry.mapping }
+    } else {
+        let lines = (read-jsonl-lines $mapping_file)
+        $lines | each { |line| $line | from json }
+    }
+}
+
+def current-path-platform [] {
+    if $nu.os-info.name == "macos" {
+        "macos"
+    } else if $nu.os-info.name == "windows" {
+        "windows"
+    } else if $nu.os-info.name == "linux" {
+        "linux"
+    } else {
+        $nu.os-info.name
+    }
+}
+
+def get-record-value [record: record, key: string] {
+    try {
+        $record | get $key
+    } catch {
+        null
+    }
+}
+
+def normalize-path-for-platform [path: string, platform: string] {
+    if $platform == "windows" {
+        $path | str replace --all "/" "\\"
+    } else {
+        $path | str replace --all "\\" "/"
+    }
 }
 
 def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
@@ -273,25 +359,24 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
         return "skip"
     }
 
-    let first_line = ($all_lines | get 0)
-
-    let cwd_match = ($first_line | parse --regex '"cwd":"(?P<cwd>[^"]*)"')
-    if ($cwd_match | length) == 0 {
+    let first_record = try {
+        $all_lines | get 0 | from json
+    } catch {
         return "skip"
     }
 
-    let old_cwd = ($cwd_match | get 0 | get cwd)
+    let old_cwd = try {
+        $first_record.payload.cwd
+    } catch {
+        return "skip"
+    }
 
     mut new_cwd = $old_cwd
     for mapping in $mappings {
         if ($old_cwd | str starts-with $mapping.from) {
             let suffix = ($old_cwd | str substring ($mapping.from | str length)..)
             let joined = $"($mapping.to)($suffix)"
-            $new_cwd = (if $nu.os-info.name == "windows" {
-                $joined | str replace --all "/" "\\"
-            } else {
-                $joined
-            })
+            $new_cwd = (normalize-path-for-platform $joined $mapping.target_platform)
             break
         }
     }
@@ -305,7 +390,7 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
         return "would_remap"
     }
 
-    let new_first_line = ($first_line | str replace $"\"cwd\":\"($old_cwd)\"" $"\"cwd\":\"($new_cwd)\"")
+    let new_first_line = ($first_record | upsert payload.cwd $new_cwd | to json --raw)
     let rest = ($all_lines | skip 1)
     let new_content = ([$new_first_line] | append $rest | str join (char nl))
 
@@ -328,7 +413,7 @@ def main [] {
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders"
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000.zip --replace-folders"
     print "  nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl"
-    print "  nu codex-chat.nu remap-paths [--mapping-file path-mapping.jsonl] [--dry-run]"
+    print "  nu codex-chat.nu remap-paths [--mapping-file path-mapping.toml] [--dry-run]"
     print "  nu codex-chat.nu compress"
 }
 
@@ -459,7 +544,7 @@ def "main restore" [
         }
         print $"Restore completed into: ($codex_home)"
 
-        let mapping_file = (join-path [(script-dir) "path-mapping.jsonl"])
+        let mapping_file = (default-path-mapping-file)
         if ($mapping_file | path exists) {
             print ""
             print "Running path remap..."
@@ -467,7 +552,7 @@ def "main restore" [
                 run-remap $codex_home $mapping_file false
             } catch { |err|
                 print $"Path remap skipped: ($err.msg)"
-                print "Run 'nu codex-chat.nu remap-paths' manually after fixing path-mapping.jsonl."
+                print "Run 'nu codex-chat.nu remap-paths' manually after fixing the path mapping file."
             }
         }
     } catch { |err|
@@ -508,7 +593,7 @@ def "main remap-paths" [
 ] {
     let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
     let mf = (if $mapping_file == null {
-        join-path [(script-dir) "path-mapping.jsonl"]
+        default-path-mapping-file
     } else {
         $mapping_file
     } | path expand)
