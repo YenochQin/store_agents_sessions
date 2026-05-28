@@ -17,7 +17,7 @@ def join-path [parts: list<any>] {
 }
 
 def default-codex-home [] {
-    join-path [(home) ".codex"]
+    join-path [$nu.home-dir ".codex"]
 }
 
 def default-sync-root [] {
@@ -79,15 +79,9 @@ def merge-index-lines [source: string, destination: string, create_destination: 
     let existing_lines = (read-jsonl-lines $destination)
     let source_lines = (read-jsonl-lines $source)
 
-    mut seen = $existing_lines
-    mut to_append = []
-
-    for line in $source_lines {
-        if not ($seen | any { |existing| $existing == $line }) {
-            $to_append = ($to_append | append $line)
-            $seen = ($seen | append $line)
-        }
-    }
+    let to_append = ($source_lines
+        | where { |line| $line not-in $existing_lines }
+        | reduce -f [] { |line, acc| if $line not-in $acc { $acc | append $line } else { $acc } })
 
     if ($to_append | length) == 0 {
         print "No new index lines to merge."
@@ -127,8 +121,13 @@ def copy-missing-tree-items [source_root: string, destination_root: string] {
 def create-zip [source_dir: string, zip_path: string] {
     let parent = ($source_dir | path dirname)
     let leaf = ($source_dir | path basename)
+    let zip_abs = ($zip_path | path expand)
 
-    ^tar -a -cf $zip_path -C $parent $leaf
+    if $nu.os-info.name == "windows" {
+        ^tar -a -cf $zip_abs -C $parent $leaf
+    } else {
+        do { cd $parent; ^zip -rq $zip_abs $leaf }
+    }
 }
 
 def main [] {
@@ -171,12 +170,13 @@ def "main backup" [
     cp -r $archived_sessions (join-path [$destination "archived_sessions"])
     cp $index (join-path [$destination "session_index.jsonl"])
 
-    print $"Backup created: ($destination)"
-
     if $zip {
         let zip_path = $"($destination).zip"
         create-zip $destination $zip_path
-        print $"Zip created:    ($zip_path)"
+        rm -r -f $destination
+        print $"Backup created: ($zip_path)"
+    } else {
+        print $"Backup created: ($destination)"
     }
 }
 
@@ -215,24 +215,24 @@ def "main restore" [
     mkdir $codex_home
     mkdir $safety_root
 
-    let safety_backup = (unique-backup-path $safety_root "before-restore")
     let local_sessions = (join-path [$codex_home "sessions"])
     let local_archived_sessions = (join-path [$codex_home "archived_sessions"])
     let local_index = (join-path [$codex_home "session_index.jsonl"])
 
+    if not $merge_folders {
+        for target in [$local_sessions $local_archived_sessions] {
+            if ($target | path exists) and (not $replace_folders) {
+                error make { msg: $"Destination folder already exists: ($target). Rerun with --merge-folders to add missing files or --replace-folders to replace Codex chat folders." }
+            }
+        }
+    }
+
+    let safety_backup = (unique-backup-path $safety_root "before-restore")
     mkdir $safety_backup
     copy-if-exists $local_sessions (join-path [$safety_backup "sessions"])
     copy-if-exists $local_archived_sessions (join-path [$safety_backup "archived_sessions"])
     copy-if-exists $local_index (join-path [$safety_backup "session_index.jsonl"])
     print $"Safety backup created: ($safety_backup)"
-
-    if not $merge_folders {
-        for target in [$local_sessions $local_archived_sessions] {
-            if ($target | path exists) and (not $replace_folders) {
-                error make { msg: $"Destination folder already exists: ($target). Safety backup has been created. Rerun with --merge-folders to add missing files or --replace-folders to replace Codex chat folders." }
-            }
-        }
-    }
 
     if $merge_folders {
         copy-missing-tree-items $backup_sessions $local_sessions

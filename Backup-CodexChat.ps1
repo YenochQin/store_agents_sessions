@@ -72,8 +72,8 @@ if ($PSCmdlet.ShouldProcess($destination, "Create Codex chat backup")) {
     if ($Zip) {
         $zipPath = "$destination.zip"
         Compress-Archive -LiteralPath $destination -DestinationPath $zipPath -Force
-        Write-Host "Backup created: $destination"
-        Write-Host "Zip created:    $zipPath"
+        Remove-Item -LiteralPath $destination -Recurse -Force
+        Write-Host "Backup created: $zipPath"
     }
     else {
         Write-Host "Backup created: $destination"
