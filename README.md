@@ -1,127 +1,81 @@
-# Codex Chat Backup Scripts
+# Codex Chat Backup & Sync
 
-These scripts back up and restore only Codex App conversation files:
+Backup, restore, and sync [Codex App](https://codex.openai.com/) conversation data across machines. Two implementations are provided: **PowerShell** (Windows) and **Nushell** (cross-platform).
 
-- Windows: `%USERPROFILE%\.codex\sessions`
-- Windows: `%USERPROFILE%\.codex\archived_sessions`
-- Windows: `%USERPROFILE%\.codex\session_index.jsonl`
-- macOS/Linux: `~/.codex/sessions`
-- macOS/Linux: `~/.codex/archived_sessions`
-- macOS/Linux: `~/.codex/session_index.jsonl`
+Only conversation files are backed up -- the scripts intentionally skip the rest of `~/.codex`.
 
-They intentionally do not copy the whole `.codex` directory.
+| File | Platform |
+|------|----------|
+| `sessions/` | Active conversation sessions |
+| `archived_sessions/` | Archived conversations |
+| `session_index.jsonl` | Session metadata index |
 
 ## Scripts
 
-- `Backup-CodexChat.ps1` creates a timestamped backup under this directory's `codex-chat-sync` folder.
-- `Restore-CodexChat.ps1` restores a selected backup and first creates a safety backup of the current local records.
-- `Merge-CodexSessionIndex.ps1` appends missing `session_index.jsonl` entries without overwriting the destination index.
-- `Compress-CodexChatBackups.ps1` creates zip archives for older timestamped backup folders.
-- `codex-chat.nu` is the cross-platform Nushell version for Windows and macOS.
+| Script | Description |
+|--------|-------------|
+| `Backup-CodexChat.ps1` | Create a timestamped backup |
+| `Restore-CodexChat.ps1` | Restore from a backup (creates a safety backup first) |
+| `Merge-CodexSessionIndex.ps1` | Append missing index entries without overwriting |
+| `Compress-CodexChatBackups.ps1` | Zip backup folders older than N days |
+| `codex-chat.nu` | Nushell equivalent with `backup`, `restore`, `merge-index`, `compress` subcommands |
 
-## Local Sync Directory
+## Quick Start
 
-The default sync and backup root is the `codex-chat-sync` directory next to these scripts.
+Close Codex App before running any script.
 
-In this workspace that is:
-
-```text
-D:\ProjectFiles\store_agents_sessions\codex-chat-sync
-```
-
-Each backup is stored in a timestamped child directory:
-
-```text
-codex-chat-sync\
-  20260528-103000\
-    sessions\
-    archived_sessions\
-    session_index.jsonl
-```
-
-On macOS, put `codex-chat.nu` and `codex-chat-sync` in the same folder. The script will use that local `codex-chat-sync` folder automatically.
-
-You can sync this `codex-chat-sync` directory with OneDrive, Dropbox, Syncthing, or a private Git repository. Do not sync the entire `.codex` directory.
-
-## Daily Backup
-
-Close Codex App first, then run:
+### Backup
 
 ```powershell
+# PowerShell
 .\Backup-CodexChat.ps1
-```
 
-Nushell:
-
-```nu
-nu codex-chat.nu backup
-```
-
-Create a zip copy at the same time:
-
-```powershell
+# With zip archive
 .\Backup-CodexChat.ps1 -Zip
 ```
 
-Nushell:
-
 ```nu
+# Nushell
+nu codex-chat.nu backup
+
+# With zip archive
 nu codex-chat.nu backup --zip
 ```
 
-If you need to back up from a custom Codex home:
+### Restore
 
 ```powershell
-.\Backup-CodexChat.ps1 -CodexHome "D:\Somewhere\.codex"
-```
-
-Nushell:
-
-```nu
-nu codex-chat.nu backup --codex-home "D:\Somewhere\.codex"
-```
-
-macOS example:
-
-```nu
-nu codex-chat.nu backup --codex-home ~/.codex
-```
-
-## Restore Or Migrate
-
-Close Codex App first.
-
-Restore folders and merge index lines from a backup:
-
-```powershell
+# PowerShell -- default (fails if destination folders exist)
 .\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000"
-```
 
-If this computer already has Codex records, merge missing session files and append missing index lines:
-
-```powershell
+# Merge missing files into existing data
 .\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000" -MergeFolders
-```
 
-Nushell:
-
-```nu
-nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders
-```
-
-By default the restore script refuses to replace existing `sessions` and `archived_sessions` folders. To replace them after the safety backup is made:
-
-```powershell
+# Replace existing folders entirely
 .\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000" -ReplaceFolders
 ```
 
-Nushell:
-
 ```nu
+# Nushell
+nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders
 nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders
 ```
 
-## Merge Only The Index
+A safety backup (`before-restore-*`) is always created before any restore operation.
+
+## Restore Modes
+
+| Mode | Behavior |
+|------|----------|
+| Default | Fails if `sessions/` or `archived_sessions/` already exist at the destination |
+| `-MergeFolders` / `--merge-folders` | Copies only files that don't already exist locally |
+| `-ReplaceFolders` / `--replace-folders` | Deletes existing folders and replaces them from backup |
+
+All three modes merge `session_index.jsonl` by appending deduplicated lines.
+
+## Merge Index Only
+
+Append missing session index entries without touching session folders:
 
 ```powershell
 .\Merge-CodexSessionIndex.ps1 `
@@ -129,32 +83,60 @@ nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --repla
   -DestinationIndex "$HOME\.codex\session_index.jsonl"
 ```
 
-Nushell:
-
 ```nu
 nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl
 ```
 
-## Monthly Compression
+## Compress Old Backups
 
-Zip backup folders older than 30 days:
+Zip backup folders older than 30 days (default):
 
 ```powershell
 .\Compress-CodexChatBackups.ps1
-```
 
-Remove folders after their zip is created:
-
-```powershell
+# Remove original folders after zipping
 .\Compress-CodexChatBackups.ps1 -RemoveOriginal
 ```
 
-Nushell:
-
 ```nu
+nu codex-chat.nu compress
 nu codex-chat.nu compress --remove-original
 ```
 
-## Syncing
+## Custom Codex Home
 
-Sync `codex-chat-sync` with OneDrive, Dropbox, Syncthing, or a private Git repository. Do not sync the entire `.codex` directory.
+Both implementations default to `~/.codex`. Override with:
+
+```powershell
+.\Backup-CodexChat.ps1 -CodexHome "D:\Somewhere\.codex"
+```
+
+```nu
+nu codex-chat.nu backup --codex-home /path/to/.codex
+```
+
+## Backup Storage Layout
+
+Backups are stored in `codex-chat-sync/` next to the scripts, using timestamped directories with collision avoidance:
+
+```
+codex-chat-sync/
+  20260528-103000/
+    sessions/
+    archived_sessions/
+    session_index.jsonl
+  20260528-103000.zip
+  before-restore-20260528-120000/
+    ...
+```
+
+## Syncing Across Machines
+
+Sync the `codex-chat-sync/` directory using OneDrive, Dropbox, Syncthing, or a private Git repository. Do **not** sync the entire `~/.codex` directory.
+
+## Safety
+
+- Scripts check for a running Codex process and refuse to proceed unless `--ignore-running-codex` / `-IgnoreRunningCodex` is passed.
+- Restore always creates a safety backup before modifying local data.
+- Index merging is append-only and deduplicated by exact line equality.
+- Timestamped paths include a counter suffix to avoid collisions.
