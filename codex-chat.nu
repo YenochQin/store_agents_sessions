@@ -189,6 +189,75 @@ def resolve-backup-source [backup_path: string] {
     { root: $root, temp: $temp_dir }
 }
 
+def load-path-mappings [mapping_file: string] {
+    assert-path $mapping_file "path mapping file"
+
+    let lines = (read-jsonl-lines $mapping_file)
+    let mappings = ($lines | each { |line| $line | from json })
+
+    for mapping in $mappings {
+        if not ("from" in $mapping) or not ("to" in $mapping) {
+            error make { msg: $"Invalid mapping entry (missing 'from' or 'to'): ($mapping)" }
+        }
+    }
+
+    $mappings | sort-by { |m| -($m.from | str length) }
+}
+
+def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
+    let raw = (open --raw $file_path)
+    let all_lines = ($raw | lines)
+
+    if ($all_lines | length) == 0 {
+        return "skip"
+    }
+
+    let first_line = ($all_lines | get 0)
+
+    let cwd_match = ($first_line | parse --regex '"cwd":"(?P<cwd>[^"]*)"')
+    if ($cwd_match | length) == 0 {
+        return "skip"
+    }
+
+    let old_cwd = ($cwd_match | get 0 | get cwd)
+
+    mut new_cwd = $old_cwd
+    for mapping in $mappings {
+        if ($old_cwd | str starts-with $mapping.from) {
+            let suffix = ($old_cwd | str substring ($mapping.from | str length)..)
+            let joined = $"($mapping.to)($suffix)"
+            $new_cwd = (if $nu.os-info.name == "windows" {
+                $joined | str replace --all "/" "\\"
+            } else {
+                $joined
+            })
+            break
+        }
+    }
+
+    if $new_cwd == $old_cwd {
+        return "unchanged"
+    }
+
+    if $dry_run {
+        print $"  ($file_path | path basename): ($old_cwd) -> ($new_cwd)"
+        return "would_remap"
+    }
+
+    let new_first_line = ($first_line | str replace $"\"cwd\":\"($old_cwd)\"" $"\"cwd\":\"($new_cwd)\"")
+    let rest = ($all_lines | skip 1)
+    let new_content = ([$new_first_line] | append $rest | str join (char nl))
+
+    let final_content = if ($raw | str ends-with (char nl)) {
+        $new_content + (char nl)
+    } else {
+        $new_content
+    }
+
+    $final_content | save --force $file_path
+    "remapped"
+}
+
 def main [] {
     print "Codex chat sync helper"
     print ""
@@ -198,6 +267,7 @@ def main [] {
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders"
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000.zip --replace-folders"
     print "  nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl"
+    print "  nu codex-chat.nu remap-paths [--mapping-file path-mapping.jsonl] [--dry-run]"
     print "  nu codex-chat.nu compress"
 }
 
@@ -316,11 +386,16 @@ def "main restore" [
             cp -r $backup_archived_sessions $local_archived_sessions
         }
 
-        if not ($local_index | path exists) {
-            "" | save --force $local_index
-        }
+        if $replace_folders {
+            cp $backup_index $local_index
+            print $"Replaced session index: ($local_index)"
+        } else {
+            if not ($local_index | path exists) {
+                "" | save --force $local_index
+            }
 
-        merge-index-lines $backup_index $local_index true
+            merge-index-lines $backup_index $local_index true
+        }
         print $"Restore completed into: ($codex_home)"
     } catch { |err|
         if (($temp_extract | str length) > 0) and ($temp_extract | path exists) {
@@ -351,6 +426,79 @@ def "main merge-index" [
     } | path expand)
 
     merge-index-lines $source $destination $create_destination
+}
+
+def "main remap-paths" [
+    --codex-home: string
+    --mapping-file: string
+    --dry-run
+] {
+    let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
+    let mf = (if $mapping_file == null {
+        join-path [(script-dir) "path-mapping.jsonl"]
+    } else {
+        $mapping_file
+    } | path expand)
+
+    let mappings = (load-path-mappings $mf)
+
+    let invalid = ($mappings | where { |m| ($m.to | str starts-with "FILL_IN") })
+    if ($invalid | length) > 0 {
+        print "The following mappings have placeholder 'to' values that must be filled in:"
+        for m in $invalid {
+            print $"  ($m.from) -> ($m.to)"
+        }
+        error make { msg: "Edit path-mapping.jsonl and replace FILL_IN_WINDOWS_PATH entries before running." }
+    }
+
+    let sessions_dir = (join-path [$codex_home "sessions"])
+    let archived_dir = (join-path [$codex_home "archived_sessions"])
+
+    def find-jsonl-files [dir: string] {
+        ls -a $dir | reduce -f [] { |entry, acc|
+            if (($entry.type | into string) == "dir") {
+                $acc | append (find-jsonl-files $entry.name)
+            } else if ($entry.name | str ends-with ".jsonl") {
+                $acc | append $entry.name
+            } else {
+                $acc
+            }
+        }
+    }
+
+    mut files = []
+    if ($sessions_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $sessions_dir))
+    }
+    if ($archived_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $archived_dir))
+    }
+
+    if ($files | length) == 0 {
+        print "No session files found."
+        return
+    }
+
+    if $dry_run {
+        print "Dry run - no files will be modified:"
+    }
+
+    mut remapped = 0
+    mut unchanged = 0
+    mut skipped = 0
+
+    for file in $files {
+        let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
+        if $result == "remapped" or $result == "would_remap" {
+            $remapped = $remapped + 1
+        } else if $result == "unchanged" {
+            $unchanged = $unchanged + 1
+        } else {
+            $skipped = $skipped + 1
+        }
+    }
+
+    print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
 }
 
 def "main compress" [

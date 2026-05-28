@@ -168,11 +168,17 @@ try {
             Copy-Item -LiteralPath $backupArchivedSessions -Destination $localArchivedSessions -Recurse
         }
 
-        if (-not (Test-Path -LiteralPath $localIndex)) {
-            New-Item -ItemType File -Path $localIndex | Out-Null
+        if ($ReplaceFolders) {
+            Copy-Item -LiteralPath $backupIndex -Destination $localIndex -Force
+            Write-Host "Replaced session index: $localIndex"
         }
+        else {
+            if (-not (Test-Path -LiteralPath $localIndex)) {
+                New-Item -ItemType File -Path $localIndex | Out-Null
+            }
 
-        & (Join-Path $PSScriptRoot "Merge-CodexSessionIndex.ps1") -SourceIndex $backupIndex -DestinationIndex $localIndex
+            & (Join-Path $PSScriptRoot "Merge-CodexSessionIndex.ps1") -SourceIndex $backupIndex -DestinationIndex $localIndex
+        }
         Write-Host "Restore completed into: $codexHomeFull"
     }
 }
