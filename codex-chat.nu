@@ -189,6 +189,67 @@ def resolve-backup-source [backup_path: string] {
     { root: $root, temp: $temp_dir }
 }
 
+def find-jsonl-files [dir: string] {
+    ls -a $dir | reduce -f [] { |entry, acc|
+        if (($entry.type | into string) == "dir") {
+            $acc | append (find-jsonl-files $entry.name)
+        } else if ($entry.name | str ends-with ".jsonl") {
+            $acc | append $entry.name
+        } else {
+            $acc
+        }
+    }
+}
+
+def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
+    let mappings = (load-path-mappings $mapping_file)
+
+    let invalid = ($mappings | where { |m| ($m.to | str starts-with "FILL_IN") })
+    if ($invalid | length) > 0 {
+        print "The following mappings have placeholder 'to' values that must be filled in:"
+        for m in $invalid {
+            print $"  ($m.from) -> ($m.to)"
+        }
+        error make { msg: "Edit path-mapping.jsonl and replace FILL_IN_WINDOWS_PATH entries before running." }
+    }
+
+    let sessions_dir = (join-path [$codex_home "sessions"])
+    let archived_dir = (join-path [$codex_home "archived_sessions"])
+
+    mut files = []
+    if ($sessions_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $sessions_dir))
+    }
+    if ($archived_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $archived_dir))
+    }
+
+    if ($files | length) == 0 {
+        return
+    }
+
+    if $dry_run {
+        print "Dry run - no files will be modified:"
+    }
+
+    mut remapped = 0
+    mut unchanged = 0
+    mut skipped = 0
+
+    for file in $files {
+        let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
+        if $result == "remapped" or $result == "would_remap" {
+            $remapped = $remapped + 1
+        } else if $result == "unchanged" {
+            $unchanged = $unchanged + 1
+        } else {
+            $skipped = $skipped + 1
+        }
+    }
+
+    print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
+}
+
 def load-path-mappings [mapping_file: string] {
     assert-path $mapping_file "path mapping file"
 
@@ -397,6 +458,18 @@ def "main restore" [
             merge-index-lines $backup_index $local_index true
         }
         print $"Restore completed into: ($codex_home)"
+
+        let mapping_file = (join-path [(script-dir) "path-mapping.jsonl"])
+        if ($mapping_file | path exists) {
+            print ""
+            print "Running path remap..."
+            try {
+                run-remap $codex_home $mapping_file false
+            } catch { |err|
+                print $"Path remap skipped: ($err.msg)"
+                print "Run 'nu codex-chat.nu remap-paths' manually after fixing path-mapping.jsonl."
+            }
+        }
     } catch { |err|
         if (($temp_extract | str length) > 0) and ($temp_extract | path exists) {
             rm -r -f $temp_extract
@@ -440,65 +513,7 @@ def "main remap-paths" [
         $mapping_file
     } | path expand)
 
-    let mappings = (load-path-mappings $mf)
-
-    let invalid = ($mappings | where { |m| ($m.to | str starts-with "FILL_IN") })
-    if ($invalid | length) > 0 {
-        print "The following mappings have placeholder 'to' values that must be filled in:"
-        for m in $invalid {
-            print $"  ($m.from) -> ($m.to)"
-        }
-        error make { msg: "Edit path-mapping.jsonl and replace FILL_IN_WINDOWS_PATH entries before running." }
-    }
-
-    let sessions_dir = (join-path [$codex_home "sessions"])
-    let archived_dir = (join-path [$codex_home "archived_sessions"])
-
-    def find-jsonl-files [dir: string] {
-        ls -a $dir | reduce -f [] { |entry, acc|
-            if (($entry.type | into string) == "dir") {
-                $acc | append (find-jsonl-files $entry.name)
-            } else if ($entry.name | str ends-with ".jsonl") {
-                $acc | append $entry.name
-            } else {
-                $acc
-            }
-        }
-    }
-
-    mut files = []
-    if ($sessions_dir | path exists) {
-        $files = ($files | append (find-jsonl-files $sessions_dir))
-    }
-    if ($archived_dir | path exists) {
-        $files = ($files | append (find-jsonl-files $archived_dir))
-    }
-
-    if ($files | length) == 0 {
-        print "No session files found."
-        return
-    }
-
-    if $dry_run {
-        print "Dry run - no files will be modified:"
-    }
-
-    mut remapped = 0
-    mut unchanged = 0
-    mut skipped = 0
-
-    for file in $files {
-        let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
-        if $result == "remapped" or $result == "would_remap" {
-            $remapped = $remapped + 1
-        } else if $result == "unchanged" {
-            $unchanged = $unchanged + 1
-        } else {
-            $skipped = $skipped + 1
-        }
-    }
-
-    print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
+    run-remap $codex_home $mf $dry_run
 }
 
 def "main compress" [

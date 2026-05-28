@@ -82,7 +82,9 @@ A safety backup (`before-restore-*`) is always created before any restore operat
 
 ## Cross-Platform Migration
 
-Session files store the project path (`cwd`) from the originating machine. When migrating between macOS and Windows (or vice versa), the Codex app won't display restored conversations because the paths don't match. Use `remap-paths` to rewrite them.
+Session files store the project path (`cwd`) from the originating machine. When migrating between macOS and Windows (or vice versa), the Codex app won't display restored conversations because the paths don't match.
+
+The `restore` command automatically remaps paths after restoring if `path-mapping.jsonl` exists alongside the script. You can also run `remap-paths` manually at any time.
 
 ### 1. Configure path mappings
 
@@ -98,7 +100,9 @@ Edit `path-mapping.jsonl` (one JSON object per line):
 - Longest prefix matches first
 - Remove lines for paths with no local equivalent (those sessions keep their original paths)
 
-### 2. Preview and apply
+### 2. Run manually (optional)
+
+If you need to preview or re-run the remapping independently:
 
 ```nu
 # Preview changes without modifying files
@@ -119,10 +123,8 @@ nu codex-chat.nu backup --zip
 
 # Transfer the zip via OneDrive / Dropbox / Syncthing / USB
 
-# On target machine: restore + remap
+# On target machine: restore (auto-remaps if path-mapping.jsonl exists)
 nu codex-chat.nu restore --backup-path ./codex-chat-sync/YYYYMMDD-HHMMSS.zip --replace-folders
-nu codex-chat.nu remap-paths --dry-run
-nu codex-chat.nu remap-paths
 
 # Restart Codex App
 ```
