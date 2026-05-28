@@ -1,0 +1,314 @@
+#!/usr/bin/env nu
+
+const SYNC_DIR_NAME = "codex-chat-sync"
+
+def script-dir [] {
+    let file_pwd = ($env.FILE_PWD? | default null)
+
+    if $file_pwd == null {
+        pwd
+    } else {
+        $file_pwd
+    }
+}
+
+def join-path [parts: list<any>] {
+    $parts | each { |part| $part | into string } | path join
+}
+
+def default-codex-home [] {
+    join-path [(home) ".codex"]
+}
+
+def default-sync-root [] {
+    join-path [(script-dir) $SYNC_DIR_NAME]
+}
+
+def codex-running [] {
+    (ps | where { |process| ($process.name | str downcase) =~ "codex" } | length) > 0
+}
+
+def assert-path [path: string, description: string] {
+    if not ($path | path exists) {
+        error make { msg: $"Missing ($description): ($path)" }
+    }
+}
+
+def unique-backup-path [root: string, prefix?: string] {
+    let timestamp = (date now | format date "%Y%m%d-%H%M%S")
+    let name = if ($prefix | default "" | is-empty) {
+        $timestamp
+    } else {
+        $"($prefix)-($timestamp)"
+    }
+
+    mut candidate = (join-path [$root $name])
+    mut counter = 1
+
+    while ($candidate | path exists) {
+        let suffix = if $counter < 10 { $"0($counter)" } else { $counter | into string }
+        $candidate = (join-path [$root $"($name)-($suffix)"])
+        $counter = $counter + 1
+    }
+
+    $candidate
+}
+
+def read-jsonl-lines [path: string] {
+    if not ($path | path exists) {
+        []
+    } else {
+        open --raw $path | lines | where { |line| ($line | str trim | str length) > 0 }
+    }
+}
+
+def merge-index-lines [source: string, destination: string, create_destination: bool] {
+    assert-path $source "source session_index.jsonl"
+
+    let destination_dir = ($destination | path dirname)
+    assert-path $destination_dir "destination directory"
+
+    if not ($destination | path exists) {
+        if not $create_destination {
+            error make { msg: $"Destination index does not exist: ($destination). Use --create-destination to create it." }
+        }
+
+        "" | save --force $destination
+    }
+
+    let existing_lines = (read-jsonl-lines $destination)
+    let source_lines = (read-jsonl-lines $source)
+
+    mut seen = $existing_lines
+    mut to_append = []
+
+    for line in $source_lines {
+        if not ($seen | any { |existing| $existing == $line }) {
+            $to_append = ($to_append | append $line)
+            $seen = ($seen | append $line)
+        }
+    }
+
+    if ($to_append | length) == 0 {
+        print "No new index lines to merge."
+        return
+    }
+
+    let destination_raw = (open --raw $destination)
+    let needs_leading_newline = (($destination_raw | str length) > 0) and (not ($destination_raw | str ends-with (char nl)))
+    let prefix = if $needs_leading_newline { char nl } else { "" }
+    let text = ($prefix + ($to_append | str join (char nl)) + (char nl))
+
+    $text | save --append $destination
+    print $"Merged (($to_append | length)) new index lines into: ($destination)"
+}
+
+def copy-if-exists [source: string, destination: string] {
+    if ($source | path exists) {
+        cp -r $source $destination
+    }
+}
+
+def copy-missing-tree-items [source_root: string, destination_root: string] {
+    mkdir $destination_root
+
+    for entry in (ls -a $source_root) {
+        let target = (join-path [$destination_root ($entry.name | path basename)])
+
+        if (($entry.type | into string) == "dir") {
+            copy-missing-tree-items $entry.name $target
+        } else if not ($target | path exists) {
+            mkdir ($target | path dirname)
+            cp $entry.name $target
+        }
+    }
+}
+
+def create-zip [source_dir: string, zip_path: string] {
+    let parent = ($source_dir | path dirname)
+    let leaf = ($source_dir | path basename)
+
+    ^tar -a -cf $zip_path -C $parent $leaf
+}
+
+def main [] {
+    print "Codex chat sync helper"
+    print ""
+    print "Commands:"
+    print "  nu codex-chat.nu backup"
+    print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders"
+    print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders"
+    print "  nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl"
+    print "  nu codex-chat.nu compress"
+}
+
+def "main backup" [
+    --codex-home: string
+    --backup-root: string
+    --zip
+    --ignore-running-codex
+] {
+    let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
+    let backup_root = (if $backup_root == null { default-sync-root } else { $backup_root } | path expand)
+
+    if (codex-running) and (not $ignore_running_codex) {
+        error make { msg: "Codex appears to be running. Close Codex App before backup, or rerun with --ignore-running-codex if you accept the risk." }
+    }
+
+    let sessions = (join-path [$codex_home "sessions"])
+    let archived_sessions = (join-path [$codex_home "archived_sessions"])
+    let index = (join-path [$codex_home "session_index.jsonl"])
+
+    assert-path $sessions "Codex sessions path"
+    assert-path $archived_sessions "Codex archived_sessions path"
+    assert-path $index "Codex session_index.jsonl"
+
+    mkdir $backup_root
+    let destination = (unique-backup-path $backup_root)
+
+    mkdir $destination
+    cp -r $sessions (join-path [$destination "sessions"])
+    cp -r $archived_sessions (join-path [$destination "archived_sessions"])
+    cp $index (join-path [$destination "session_index.jsonl"])
+
+    print $"Backup created: ($destination)"
+
+    if $zip {
+        let zip_path = $"($destination).zip"
+        create-zip $destination $zip_path
+        print $"Zip created:    ($zip_path)"
+    }
+}
+
+def "main restore" [
+    --backup-path: string
+    --codex-home: string
+    --safety-backup-root: string
+    --merge-folders
+    --replace-folders
+    --ignore-running-codex
+] {
+    if $backup_path == null {
+        error make { msg: "Missing required option: --backup-path" }
+    }
+
+    if $merge_folders and $replace_folders {
+        error make { msg: "Use only one mode: --merge-folders or --replace-folders." }
+    }
+
+    let backup = ($backup_path | path expand)
+    let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
+    let safety_root = (if $safety_backup_root == null { default-sync-root } else { $safety_backup_root } | path expand)
+
+    if (codex-running) and (not $ignore_running_codex) {
+        error make { msg: "Codex appears to be running. Close Codex App before restore, or rerun with --ignore-running-codex if you accept the risk." }
+    }
+
+    let backup_sessions = (join-path [$backup "sessions"])
+    let backup_archived_sessions = (join-path [$backup "archived_sessions"])
+    let backup_index = (join-path [$backup "session_index.jsonl"])
+
+    assert-path $backup_sessions "backup sessions"
+    assert-path $backup_archived_sessions "backup archived_sessions"
+    assert-path $backup_index "backup session_index.jsonl"
+
+    mkdir $codex_home
+    mkdir $safety_root
+
+    let safety_backup = (unique-backup-path $safety_root "before-restore")
+    let local_sessions = (join-path [$codex_home "sessions"])
+    let local_archived_sessions = (join-path [$codex_home "archived_sessions"])
+    let local_index = (join-path [$codex_home "session_index.jsonl"])
+
+    mkdir $safety_backup
+    copy-if-exists $local_sessions (join-path [$safety_backup "sessions"])
+    copy-if-exists $local_archived_sessions (join-path [$safety_backup "archived_sessions"])
+    copy-if-exists $local_index (join-path [$safety_backup "session_index.jsonl"])
+    print $"Safety backup created: ($safety_backup)"
+
+    if not $merge_folders {
+        for target in [$local_sessions $local_archived_sessions] {
+            if ($target | path exists) and (not $replace_folders) {
+                error make { msg: $"Destination folder already exists: ($target). Safety backup has been created. Rerun with --merge-folders to add missing files or --replace-folders to replace Codex chat folders." }
+            }
+        }
+    }
+
+    if $merge_folders {
+        copy-missing-tree-items $backup_sessions $local_sessions
+        copy-missing-tree-items $backup_archived_sessions $local_archived_sessions
+    } else if $replace_folders {
+        for target in [$local_sessions $local_archived_sessions] {
+            if ($target | path exists) {
+                rm -r -f $target
+            }
+        }
+
+        cp -r $backup_sessions $local_sessions
+        cp -r $backup_archived_sessions $local_archived_sessions
+    } else {
+        cp -r $backup_sessions $local_sessions
+        cp -r $backup_archived_sessions $local_archived_sessions
+    }
+
+    if not ($local_index | path exists) {
+        "" | save --force $local_index
+    }
+
+    merge-index-lines $backup_index $local_index true
+    print $"Restore completed into: ($codex_home)"
+}
+
+def "main merge-index" [
+    --source-index: string
+    --destination-index: string
+    --create-destination
+] {
+    if $source_index == null {
+        error make { msg: "Missing required option: --source-index" }
+    }
+
+    let source = ($source_index | path expand)
+    let destination = (if $destination_index == null {
+        join-path [(default-codex-home) "session_index.jsonl"]
+    } else {
+        $destination_index
+    } | path expand)
+
+    merge-index-lines $source $destination $create_destination
+}
+
+def "main compress" [
+    --backup-root: string
+    --older-than-days: int = 30
+    --remove-original
+] {
+    let backup_root = (if $backup_root == null { default-sync-root } else { $backup_root } | path expand)
+    assert-path $backup_root "backup root"
+
+    let cutoff = ((date now) - ($older_than_days * 1day))
+    let folders = (
+        ls $backup_root
+        | where { |entry|
+            (($entry.type | into string) == "dir")
+            and (($entry.name | path basename) =~ '^\d{8}-\d{6}(-\d+)?$')
+            and ($entry.modified < $cutoff)
+        }
+    )
+
+    if ($folders | length) == 0 {
+        print $"No backup folders older than ($older_than_days) days found."
+        return
+    }
+
+    for folder in $folders {
+        let zip_path = $"($folder.name).zip"
+        create-zip $folder.name $zip_path
+        print $"Zip created: ($zip_path)"
+
+        if $remove_original {
+            rm -r -f $folder.name
+            print $"Removed original folder: ($folder.name)"
+        }
+    }
+}
