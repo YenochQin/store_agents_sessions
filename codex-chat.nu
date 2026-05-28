@@ -130,6 +130,65 @@ def create-zip [source_dir: string, zip_path: string] {
     }
 }
 
+def temp-root [] {
+    if $nu.os-info.name == "windows" {
+        $env.TEMP? | default ($env.TMP? | default "C:\\Windows\\Temp")
+    } else {
+        $env.TMPDIR? | default "/tmp"
+    }
+}
+
+def extract-zip [zip_path: string, target_dir: string] {
+    mkdir $target_dir
+    let zip_abs = ($zip_path | path expand)
+
+    try {
+        if $nu.os-info.name == "windows" {
+            let system_tar = "C:\\Windows\\System32\\tar.exe"
+            if ($system_tar | path exists) {
+                ^$system_tar -xf $zip_abs -C $target_dir
+            } else {
+                ^tar -xf $zip_abs -C $target_dir
+            }
+        } else {
+            ^unzip -q $zip_abs -d $target_dir
+        }
+    } catch { |err|
+        if ($target_dir | path exists) {
+            rm -r -f $target_dir
+        }
+        error make { msg: $"Failed to extract zip ($zip_abs): ($err.msg)" }
+    }
+}
+
+def resolve-backup-source [backup_path: string] {
+    let is_zip_file = (
+        (($backup_path | path type) == "file")
+        and (($backup_path | str downcase | str ends-with ".zip"))
+    )
+
+    if not $is_zip_file {
+        return { root: $backup_path, temp: "" }
+    }
+
+    let timestamp = (date now | format date "%Y%m%d-%H%M%S-%f")
+    let temp_dir = (join-path [(temp-root) $"codex-chat-restore-($timestamp)"])
+    extract-zip $backup_path $temp_dir
+
+    let subdirs = (
+        ls -a $temp_dir
+        | where { |entry| ($entry.type | into string) == "dir" }
+    )
+
+    let root = if ($subdirs | length) == 1 {
+        ($subdirs | get 0 | get name)
+    } else {
+        $temp_dir
+    }
+
+    { root: $root, temp: $temp_dir }
+}
+
 def main [] {
     print "Codex chat sync helper"
     print ""
@@ -137,6 +196,7 @@ def main [] {
     print "  nu codex-chat.nu backup"
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders"
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders"
+    print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000.zip --replace-folders"
     print "  nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl"
     print "  nu codex-chat.nu compress"
 }
@@ -196,7 +256,7 @@ def "main restore" [
         error make { msg: "Use only one mode: --merge-folders or --replace-folders." }
     }
 
-    let backup = ($backup_path | path expand)
+    let backup_expanded = ($backup_path | path expand)
     let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
     let safety_root = (if $safety_backup_root == null { default-sync-root } else { $safety_backup_root } | path expand)
 
@@ -204,59 +264,74 @@ def "main restore" [
         error make { msg: "Codex appears to be running. Close Codex App before restore, or rerun with --ignore-running-codex if you accept the risk." }
     }
 
-    let backup_sessions = (join-path [$backup "sessions"])
-    let backup_archived_sessions = (join-path [$backup "archived_sessions"])
-    let backup_index = (join-path [$backup "session_index.jsonl"])
+    let resolved = (resolve-backup-source $backup_expanded)
+    let backup = $resolved.root
+    let temp_extract = $resolved.temp
 
-    assert-path $backup_sessions "backup sessions"
-    assert-path $backup_archived_sessions "backup archived_sessions"
-    assert-path $backup_index "backup session_index.jsonl"
+    try {
+        let backup_sessions = (join-path [$backup "sessions"])
+        let backup_archived_sessions = (join-path [$backup "archived_sessions"])
+        let backup_index = (join-path [$backup "session_index.jsonl"])
 
-    mkdir $codex_home
-    mkdir $safety_root
+        assert-path $backup_sessions "backup sessions"
+        assert-path $backup_archived_sessions "backup archived_sessions"
+        assert-path $backup_index "backup session_index.jsonl"
 
-    let local_sessions = (join-path [$codex_home "sessions"])
-    let local_archived_sessions = (join-path [$codex_home "archived_sessions"])
-    let local_index = (join-path [$codex_home "session_index.jsonl"])
+        mkdir $codex_home
+        mkdir $safety_root
 
-    if not $merge_folders {
-        for target in [$local_sessions $local_archived_sessions] {
-            if ($target | path exists) and (not $replace_folders) {
-                error make { msg: $"Destination folder already exists: ($target). Rerun with --merge-folders to add missing files or --replace-folders to replace Codex chat folders." }
-            }
-        }
-    }
+        let local_sessions = (join-path [$codex_home "sessions"])
+        let local_archived_sessions = (join-path [$codex_home "archived_sessions"])
+        let local_index = (join-path [$codex_home "session_index.jsonl"])
 
-    let safety_backup = (unique-backup-path $safety_root "before-restore")
-    mkdir $safety_backup
-    copy-if-exists $local_sessions (join-path [$safety_backup "sessions"])
-    copy-if-exists $local_archived_sessions (join-path [$safety_backup "archived_sessions"])
-    copy-if-exists $local_index (join-path [$safety_backup "session_index.jsonl"])
-    print $"Safety backup created: ($safety_backup)"
-
-    if $merge_folders {
-        copy-missing-tree-items $backup_sessions $local_sessions
-        copy-missing-tree-items $backup_archived_sessions $local_archived_sessions
-    } else if $replace_folders {
-        for target in [$local_sessions $local_archived_sessions] {
-            if ($target | path exists) {
-                rm -r -f $target
+        if not $merge_folders {
+            for target in [$local_sessions $local_archived_sessions] {
+                if ($target | path exists) and (not $replace_folders) {
+                    error make { msg: $"Destination folder already exists: ($target). Rerun with --merge-folders to add missing files or --replace-folders to replace Codex chat folders." }
+                }
             }
         }
 
-        cp -r $backup_sessions $local_sessions
-        cp -r $backup_archived_sessions $local_archived_sessions
-    } else {
-        cp -r $backup_sessions $local_sessions
-        cp -r $backup_archived_sessions $local_archived_sessions
+        let safety_backup = (unique-backup-path $safety_root "before-restore")
+        mkdir $safety_backup
+        copy-if-exists $local_sessions (join-path [$safety_backup "sessions"])
+        copy-if-exists $local_archived_sessions (join-path [$safety_backup "archived_sessions"])
+        copy-if-exists $local_index (join-path [$safety_backup "session_index.jsonl"])
+        print $"Safety backup created: ($safety_backup)"
+
+        if $merge_folders {
+            copy-missing-tree-items $backup_sessions $local_sessions
+            copy-missing-tree-items $backup_archived_sessions $local_archived_sessions
+        } else if $replace_folders {
+            for target in [$local_sessions $local_archived_sessions] {
+                if ($target | path exists) {
+                    rm -r -f $target
+                }
+            }
+
+            cp -r $backup_sessions $local_sessions
+            cp -r $backup_archived_sessions $local_archived_sessions
+        } else {
+            cp -r $backup_sessions $local_sessions
+            cp -r $backup_archived_sessions $local_archived_sessions
+        }
+
+        if not ($local_index | path exists) {
+            "" | save --force $local_index
+        }
+
+        merge-index-lines $backup_index $local_index true
+        print $"Restore completed into: ($codex_home)"
+    } catch { |err|
+        if (($temp_extract | str length) > 0) and ($temp_extract | path exists) {
+            rm -r -f $temp_extract
+        }
+        error make { msg: $err.msg }
     }
 
-    if not ($local_index | path exists) {
-        "" | save --force $local_index
+    if (($temp_extract | str length) > 0) and ($temp_extract | path exists) {
+        rm -r -f $temp_extract
     }
-
-    merge-index-lines $backup_index $local_index true
-    print $"Restore completed into: ($codex_home)"
 }
 
 def "main merge-index" [

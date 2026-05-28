@@ -89,72 +89,95 @@ $backupFull = [System.IO.Path]::GetFullPath($BackupPath)
 $codexHomeFull = [System.IO.Path]::GetFullPath($CodexHome)
 $safetyRootFull = [System.IO.Path]::GetFullPath($SafetyBackupRoot)
 
-$backupSessions = Join-Path $backupFull "sessions"
-$backupArchivedSessions = Join-Path $backupFull "archived_sessions"
-$backupIndex = Join-Path $backupFull "session_index.jsonl"
+$tempExtractDir = $null
 
-if ((Test-CodexProcess) -and -not $IgnoreRunningCodex) {
-    throw "Codex appears to be running. Close Codex App before restore, or rerun with -IgnoreRunningCodex if you accept the risk."
-}
+try {
+    if ((Test-Path -LiteralPath $backupFull -PathType Leaf) -and ($backupFull -match '\.zip$')) {
+        $tempExtractDir = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-chat-restore-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tempExtractDir | Out-Null
+        Expand-Archive -LiteralPath $backupFull -DestinationPath $tempExtractDir -Force
 
-if ($MergeFolders -and $ReplaceFolders) {
-    throw "Use only one mode: -MergeFolders or -ReplaceFolders."
-}
-
-foreach ($requiredPath in @($backupSessions, $backupArchivedSessions, $backupIndex)) {
-    if (-not (Test-Path -LiteralPath $requiredPath)) {
-        throw "Backup is incomplete. Missing: $requiredPath"
-    }
-}
-
-New-Item -ItemType Directory -Force -Path $codexHomeFull | Out-Null
-New-Item -ItemType Directory -Force -Path $safetyRootFull | Out-Null
-
-$safetyBackup = New-UniquePath -Root $safetyRootFull -Prefix "before-restore"
-$localSessions = Join-Path $codexHomeFull "sessions"
-$localArchivedSessions = Join-Path $codexHomeFull "archived_sessions"
-$localIndex = Join-Path $codexHomeFull "session_index.jsonl"
-
-if ($PSCmdlet.ShouldProcess($safetyBackup, "Create safety backup of current Codex chat files")) {
-    New-Item -ItemType Directory -Force -Path $safetyBackup | Out-Null
-    Copy-IfExists -Source $localSessions -Destination (Join-Path $safetyBackup "sessions")
-    Copy-IfExists -Source $localArchivedSessions -Destination (Join-Path $safetyBackup "archived_sessions")
-    Copy-IfExists -Source $localIndex -Destination (Join-Path $safetyBackup "session_index.jsonl")
-    Write-Host "Safety backup created: $safetyBackup"
-}
-
-if (-not $MergeFolders) {
-    foreach ($targetFolder in @($localSessions, $localArchivedSessions)) {
-        if ((Test-Path -LiteralPath $targetFolder) -and -not $ReplaceFolders) {
-            throw "Destination folder already exists: $targetFolder. Safety backup has been created. Rerun with -MergeFolders to add missing files or -ReplaceFolders to replace Codex chat folders."
+        $extractedDirs = @(Get-ChildItem -LiteralPath $tempExtractDir -Directory)
+        $backupFull = if ($extractedDirs.Count -eq 1) {
+            $extractedDirs[0].FullName
+        }
+        else {
+            $tempExtractDir
         }
     }
-}
 
-if ($PSCmdlet.ShouldProcess($codexHomeFull, "Restore Codex chat folders and merge session index")) {
-    if ($MergeFolders) {
-        Copy-MissingTreeItems -SourceRoot $backupSessions -DestinationRoot $localSessions
-        Copy-MissingTreeItems -SourceRoot $backupArchivedSessions -DestinationRoot $localArchivedSessions
+    $backupSessions = Join-Path $backupFull "sessions"
+    $backupArchivedSessions = Join-Path $backupFull "archived_sessions"
+    $backupIndex = Join-Path $backupFull "session_index.jsonl"
+
+    if ((Test-CodexProcess) -and -not $IgnoreRunningCodex) {
+        throw "Codex appears to be running. Close Codex App before restore, or rerun with -IgnoreRunningCodex if you accept the risk."
     }
-    elseif ($ReplaceFolders) {
+
+    if ($MergeFolders -and $ReplaceFolders) {
+        throw "Use only one mode: -MergeFolders or -ReplaceFolders."
+    }
+
+    foreach ($requiredPath in @($backupSessions, $backupArchivedSessions, $backupIndex)) {
+        if (-not (Test-Path -LiteralPath $requiredPath)) {
+            throw "Backup is incomplete. Missing: $requiredPath"
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $codexHomeFull | Out-Null
+    New-Item -ItemType Directory -Force -Path $safetyRootFull | Out-Null
+
+    $safetyBackup = New-UniquePath -Root $safetyRootFull -Prefix "before-restore"
+    $localSessions = Join-Path $codexHomeFull "sessions"
+    $localArchivedSessions = Join-Path $codexHomeFull "archived_sessions"
+    $localIndex = Join-Path $codexHomeFull "session_index.jsonl"
+
+    if ($PSCmdlet.ShouldProcess($safetyBackup, "Create safety backup of current Codex chat files")) {
+        New-Item -ItemType Directory -Force -Path $safetyBackup | Out-Null
+        Copy-IfExists -Source $localSessions -Destination (Join-Path $safetyBackup "sessions")
+        Copy-IfExists -Source $localArchivedSessions -Destination (Join-Path $safetyBackup "archived_sessions")
+        Copy-IfExists -Source $localIndex -Destination (Join-Path $safetyBackup "session_index.jsonl")
+        Write-Host "Safety backup created: $safetyBackup"
+    }
+
+    if (-not $MergeFolders) {
         foreach ($targetFolder in @($localSessions, $localArchivedSessions)) {
-            if (Test-Path -LiteralPath $targetFolder) {
-                Remove-Item -LiteralPath $targetFolder -Recurse -Force
+            if ((Test-Path -LiteralPath $targetFolder) -and -not $ReplaceFolders) {
+                throw "Destination folder already exists: $targetFolder. Safety backup has been created. Rerun with -MergeFolders to add missing files or -ReplaceFolders to replace Codex chat folders."
             }
         }
-
-        Copy-Item -LiteralPath $backupSessions -Destination $localSessions -Recurse
-        Copy-Item -LiteralPath $backupArchivedSessions -Destination $localArchivedSessions -Recurse
-    }
-    else {
-        Copy-Item -LiteralPath $backupSessions -Destination $localSessions -Recurse
-        Copy-Item -LiteralPath $backupArchivedSessions -Destination $localArchivedSessions -Recurse
     }
 
-    if (-not (Test-Path -LiteralPath $localIndex)) {
-        New-Item -ItemType File -Path $localIndex | Out-Null
-    }
+    if ($PSCmdlet.ShouldProcess($codexHomeFull, "Restore Codex chat folders and merge session index")) {
+        if ($MergeFolders) {
+            Copy-MissingTreeItems -SourceRoot $backupSessions -DestinationRoot $localSessions
+            Copy-MissingTreeItems -SourceRoot $backupArchivedSessions -DestinationRoot $localArchivedSessions
+        }
+        elseif ($ReplaceFolders) {
+            foreach ($targetFolder in @($localSessions, $localArchivedSessions)) {
+                if (Test-Path -LiteralPath $targetFolder) {
+                    Remove-Item -LiteralPath $targetFolder -Recurse -Force
+                }
+            }
 
-    & (Join-Path $PSScriptRoot "Merge-CodexSessionIndex.ps1") -SourceIndex $backupIndex -DestinationIndex $localIndex
-    Write-Host "Restore completed into: $codexHomeFull"
+            Copy-Item -LiteralPath $backupSessions -Destination $localSessions -Recurse
+            Copy-Item -LiteralPath $backupArchivedSessions -Destination $localArchivedSessions -Recurse
+        }
+        else {
+            Copy-Item -LiteralPath $backupSessions -Destination $localSessions -Recurse
+            Copy-Item -LiteralPath $backupArchivedSessions -Destination $localArchivedSessions -Recurse
+        }
+
+        if (-not (Test-Path -LiteralPath $localIndex)) {
+            New-Item -ItemType File -Path $localIndex | Out-Null
+        }
+
+        & (Join-Path $PSScriptRoot "Merge-CodexSessionIndex.ps1") -SourceIndex $backupIndex -DestinationIndex $localIndex
+        Write-Host "Restore completed into: $codexHomeFull"
+    }
+}
+finally {
+    if ($tempExtractDir -and (Test-Path -LiteralPath $tempExtractDir)) {
+        Remove-Item -LiteralPath $tempExtractDir -Recurse -Force
+    }
 }
