@@ -299,6 +299,97 @@ def find-jsonl-files [dir: string] {
     }
 }
 
+# Gather every distinct project cwd that actually appears in local Codex records.
+# Sources: the first line (payload.cwd) of each rollout JSONL under sessions/ and
+# archived_sessions/, plus threads.cwd in each state_*.sqlite. Extended-length \\?\
+# prefixes are stripped so the values compare cleanly against mapping-file entries.
+def collect-known-cwds [codex_home: string] {
+    let sessions_dir = (join-path [$codex_home "sessions"])
+    let archived_dir = (join-path [$codex_home "archived_sessions"])
+
+    mut files = []
+    if ($sessions_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $sessions_dir))
+    }
+    if ($archived_dir | path exists) {
+        $files = ($files | append (find-jsonl-files $archived_dir))
+    }
+
+    mut cwds = []
+
+    for file in $files {
+        let cwd = (try {
+            open --raw ($file | into string) | lines | get 0 | from json | get payload.cwd?
+        } catch {
+            null
+        })
+        if ($cwd != null) and (not ($cwd | into string | is-empty)) {
+            $cwds = ($cwds | append ($cwd | into string))
+        }
+    }
+
+    for db in (find-app-db-files $codex_home) {
+        let rows = (try {
+            open $db | query db "SELECT DISTINCT cwd FROM threads" | get cwd
+        } catch {
+            []
+        })
+        for cwd in $rows {
+            if ($cwd != null) and (not ($cwd | into string | is-empty)) {
+                $cwds = ($cwds | append ($cwd | into string))
+            }
+        }
+    }
+
+    $cwds | each { |c| strip-extended-prefix $c } | uniq | sort
+}
+
+# Return the subset of cwds not covered by any registered project path. A cwd is
+# "covered" when it starts with a registered absolute path on ANY platform (a backup
+# may have been written on either machine), so the covered-prefix set is built from
+# every non-empty windows/macos/linux value in the mapping file.
+def uncovered-cwds [cwds: list<string>, mapping_file: string] {
+    let records = (read-path-mapping-records $mapping_file)
+    let platform_keys = ["macos" "windows" "linux"]
+
+    mut prefixes = []
+    for record in $records {
+        for key in $platform_keys {
+            let value = (get-record-value $record $key)
+            if ($value != null) and (not ($value | into string | is-empty)) {
+                $prefixes = ($prefixes | append ($value | into string))
+            }
+        }
+    }
+
+    $cwds | where { |cwd|
+        ($prefixes | where { |p| $cwd | str starts-with $p } | is-empty)
+    }
+}
+
+# Infer which platform a stored cwd was written on, from its shape: a drive-letter
+# (C:\, D:\) or UNC/backslash path is Windows; a leading "/" is macOS/Linux (POSIX).
+# A discovered cwd belongs to whatever machine wrote it, not necessarily this one,
+# so the emitted block keys the real path under the inferred platform.
+def infer-path-platform [path: string] {
+    if ($path =~ '^[A-Za-z]:[\\/]') or ($path | str starts-with '\\') {
+        "windows"
+    } else if ($path | str starts-with "/") {
+        "macos"
+    } else {
+        current-path-platform
+    }
+}
+
+# Suggest a [paths.<name>] slug from a cwd: lowercase the last path segment and
+# collapse non-alphanumeric runs to single dashes. Purely a convenience for the
+# emitted block; the user resolves any collisions when editing the file.
+def suggest-paths-name [cwd: string] {
+    let leaf = ($cwd | str replace --all "\\" "/" | path basename)
+    let slug = ($leaf | str downcase | str replace --all --regex '[^a-z0-9]+' '-' | str trim --char '-')
+    if ($slug | is-empty) { "project" } else { $slug }
+}
+
 def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
     let mappings = (load-path-mappings $mapping_file)
 
@@ -589,6 +680,7 @@ def main [] {
     print "  nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000.zip --replace-folders"
     print "  nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl"
     print "  nu codex-chat.nu remap-paths [--mapping-file path-mapping.toml] [--dry-run]"
+    print "  nu codex-chat.nu discover-paths [--mapping-file path-mapping.toml] [--write]"
     print "  nu codex-chat.nu compress"
 }
 
@@ -781,6 +873,66 @@ def "main remap-paths" [
     } | path expand)
 
     run-remap $codex_home $mf $dry_run
+}
+
+def "main discover-paths" [
+    --codex-home: string
+    --mapping-file: string
+    --write
+] {
+    let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
+    let mf = (if $mapping_file == null {
+        default-path-mapping-file
+    } else {
+        $mapping_file
+    } | path expand)
+
+    assert-path $mf "path mapping file"
+
+    let all_keys = ["macos" "windows" "linux"]
+
+    let uncovered = (uncovered-cwds (collect-known-cwds $codex_home) $mf)
+
+    if ($uncovered | is-empty) {
+        print "All known cwd paths are covered by the mapping file."
+        return
+    }
+
+    print $"Found (($uncovered | length)) project path\(s) not covered by ($mf):"
+    print ""
+
+    let blocks = ($uncovered | each { |cwd|
+        let name = (suggest-paths-name $cwd)
+        let owner = (infer-path-platform $cwd)
+        let quote = if $owner == "windows" { "'" } else { '"' }
+        mut lines = [$"[paths.($name)]" $"($owner) = ($quote)($cwd)($quote)"]
+        for key in ($all_keys | where { |k| $k != $owner }) {
+            $lines = ($lines | append $"($key) = \"FILL_IN\"")
+        }
+        $lines | str join (char nl)
+    })
+
+    print ($blocks | str join $"(char nl)(char nl)")
+    print ""
+
+    if not $write {
+        print "Dry run. Re-run with --write to append these entries to the mapping file."
+        return
+    }
+
+    let extension = ($mf | path parse | get extension | str downcase)
+    if $extension != "toml" {
+        error make { msg: $"--write only supports the TOML mapping file \(found .($extension)\): ($mf). The jsonl format has no [paths.*] table to append to." }
+    }
+
+    let existing_raw = (open --raw $mf)
+    let needs_leading_newline = (($existing_raw | str length) > 0) and (not ($existing_raw | str ends-with (char nl)))
+    let separator = if $needs_leading_newline { (char nl) + (char nl) } else { (char nl) }
+    let text = $separator + ($blocks | str join $"(char nl)(char nl)") + (char nl)
+
+    $text | save --append $mf
+    print $"Appended (($uncovered | length)) entry\(ies\) to: ($mf)"
+    print $"Edit it to fill in the FILL_IN value\(s\) for the other platform\(s\)."
 }
 
 def "main compress" [
