@@ -1,23 +1,25 @@
-[paths.projectfiles]
-windows = 'D:\ProjectFiles'
-macos = "/Users/yiqin/Documents/ProjectFiles"
+# Per-project absolute path mappings (Windows <-> macOS).
+# Each [paths.<name>] is one project's absolute path on each platform. Matching is
+# longest-prefix, so a project entry also covers its subdirectories. Windows paths
+# stored by Codex with the \\?\ extended-length prefix are handled automatically.
+# Entries marked CONFIRM are inferred from the parent-dir convention; verify the macOS path.
 
-[paths.pythonprojects]
-windows = 'D:\PythonProjects'
-macos = "/Users/yiqin/Documents/PythonProjects"
+[paths.llm-wiki]
+windows = 'D:\ProjectFiles\llm-wiki'
+macos = "/Users/yiqin/Documents/ProjectFiles/llm-wiki"
 
-[paths.latex]
-windows = 'E:\LaTeX'
-macos = "/Users/yiqin/Documents/LatexDocuments"
+[paths.graspkit-workspace]
+windows = 'D:\ProjectFiles\GraspKit-Workspace'
+macos = "/Users/yiqin/Documents/ProjectFiles/GraspKit-Workspace"  # CONFIRM
 
-[paths.note]
-windows = 'E:\Note'
-macos = "/Users/yiqin/Documents/Note"
+[paths.store-agents-sessions]
+windows = 'D:\ProjectFiles\store_agents_sessions'
+macos = "/Users/yiqin/Documents/ProjectFiles/store_agents_sessions"  # CONFIRM
 
-[paths.codex]
-windows = 'C:\Users\Yenoc\Documents\Codex'
-macos = "/Users/yiqin/Documents/Codex"
+[paths.graspkit-tools]
+windows = 'D:\PythonProjects\graspkit-tools'
+macos = "/Users/yiqin/Documents/PythonProjects/graspkit-tools"  # CONFIRM
 
-[paths.downloads]
-windows = 'C:\Users\Yenoc\Downloads'
-macos = "/Users/yiqin/Downloads"
+[paths.phd-paper-draft]
+windows = 'E:\LaTeX\paper\phd_paper\draft'
+macos = "/Users/yiqin/Documents/LatexDocuments/paper/phd_paper/draft"

@@ -3,42 +3,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Backup and restore scripts for Codex App conversation data (`~/.codex/sessions`, `~/.codex/archived_sessions`, `session_index.jsonl`). Two implementations: PowerShell (Windows) and Nushell (cross-platform). Backups are stored in timestamped directories under `codex-chat-sync/`.
+Backup and restore tool for Codex conversation data. Two indexes are kept in sync: the CLI's `~/.codex/session_index.jsonl` plus the rollout files under `~/.codex/sessions` and `~/.codex/archived_sessions`, and the Codex App's thread index `~/.codex/state_*.sqlite`. Backups are stored in timestamped directories under `codex-chat-sync/`.
 
 ## Architecture
 
-- **PowerShell scripts** (`*.ps1`): Four scripts, each handling one operation (backup, restore, merge-index, compress). `Restore-CodexChat.ps1` calls `Merge-CodexSessionIndex.ps1` internally.
-- **Nushell script** (`codex-chat.nu`): Single file with subcommands (`backup`, `restore`, `merge-index`, `compress`) that mirror the PowerShell scripts. All shared helpers are module-level `def` functions.
+- **Nushell script** (`codex-chat.nu`): Single file with subcommands (`backup`, `restore`, `merge-index`, `remap-paths`, `compress`). All shared helpers are module-level `def` functions. This is the only implementation; the earlier PowerShell scripts were removed.
+- **`path-mapping.toml`**: Per-project `[paths.<name>]` entries with `windows`/`macos` absolute paths. Used to remap project `cwd` when restoring across machines. Longest-prefix match wins, so a project entry also covers its subdirectories.
 - **`codex-chat-sync/`**: Git-ignored directory holding timestamped backup folders. Intended to be synced via OneDrive/Dropbox/Syncthing.
 
-Both implementations share the same safety invariants: check for running Codex process, create safety backup before restore, deduplicate JSONL index lines on merge, generate unique timestamped paths with collision avoidance.
+Safety invariants: check for running Codex process, create safety backup before restore (including `state_*.sqlite`), deduplicate JSONL index lines on merge, generate unique timestamped paths with collision avoidance.
 
 ## Common Operations
 
 ```bash
-# PowerShell - backup
-pwsh Backup-CodexChat.ps1
-
-# PowerShell - restore with merge
-pwsh Restore-CodexChat.ps1 -BackupPath "./codex-chat-sync/20260528-103000" -MergeFolders
-
-# PowerShell - compress old backups
-pwsh Compress-CodexChatBackups.ps1
-
-# Nushell - backup
+# backup (captures sessions, index, and state_*.sqlite)
 nu codex-chat.nu backup
 
-# Nushell - restore with merge
+# restore with merge
 nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders
 
-# Nushell - compress old backups
+# remap paths only (dry run)
+nu codex-chat.nu remap-paths --dry-run
+
+# compress old backups
 nu codex-chat.nu compress
 ```
 
 ## Key Design Decisions
 
-- Codex App must be closed before backup/restore (enforced by process check, overridable with `-IgnoreRunningCodex` / `--ignore-running-codex`).
+- Codex must be closed before backup/restore (enforced by process check, overridable with `--ignore-running-codex`).
 - Restore always creates a safety backup first, stored under `codex-chat-sync/before-restore-*`.
 - Index merge is append-only and deduplicated by exact line equality.
-- Three restore modes: default (fail if destination exists), `-MergeFolders` (copy only missing files), `-ReplaceFolders` (delete and replace).
-- No test suite exists. Validate changes by running scripts against a test `~/.codex` directory.
+- Three restore modes: default (fail if destination exists), `--merge-folders` (copy only missing files / merge sqlite thread rows), `--replace-folders` (delete and replace, sqlite included).
+- **Two indexes, one source of truth per client**: the CLI reads `session_index.jsonl`; the App reads `state_*.sqlite`. Both are backed up and restored so either client sees the sessions.
+- **Path remapping on restore**: `cwd` (in rollout JSONL and in `threads.cwd`) is remapped via `path-mapping.toml`; Windows extended-length `\\?\` prefixes are stripped before matching. `threads.rollout_path` is re-rooted onto the local codex home (split on the `.codex` segment), independent of the mapping file.
+- The sqlite is backed up by checkpointing the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) then copying the single `.sqlite`; on checkpoint failure it falls back to copying `-wal`/`-shm` too.
+- No test suite exists. Validate changes by running against a throwaway `--codex-home`, never the live `~/.codex`.

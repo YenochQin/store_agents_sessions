@@ -114,6 +114,100 @@ def copy-if-exists [source: string, destination: string] {
     }
 }
 
+# Codex App stores its thread index in a versioned sqlite file (state_<n>.sqlite).
+# The CLI uses session_index.jsonl instead; this file may be absent on CLI-only setups.
+def find-app-db-files [codex_home: string] {
+    if not ($codex_home | path exists) {
+        []
+    } else {
+        ls $codex_home
+        | where { |entry| (($entry.name | path basename) =~ '^state_\d+\.sqlite$') }
+        | get name
+        | each { |name| $name | into string }
+    }
+}
+
+# Checkpoint the WAL into the main file, then copy only the main .sqlite. If the
+# checkpoint fails (e.g. a writer holds the lock), fall back to copying -wal/-shm so
+# the copied set stays self-consistent.
+def backup-app-db [codex_home: string, destination: string] {
+    for db in (find-app-db-files $codex_home) {
+        let base = ($db | path basename)
+        let checkpointed = (try {
+            open $db | query db "PRAGMA wal_checkpoint(TRUNCATE)" | ignore
+            true
+        } catch { false })
+
+        cp $db (join-path [$destination $base])
+
+        if not $checkpointed {
+            for suffix in ["-wal" "-shm"] {
+                let extra = $"($db)($suffix)"
+                if ($extra | path exists) {
+                    cp $extra (join-path [$destination $"($base)($suffix)"])
+                }
+            }
+        }
+    }
+}
+
+# Tables in the App db that are keyed per thread and worth carrying across a restore.
+# Listed parent-first so child rows always find their thread on INSERT OR IGNORE.
+def app-db-tables [] {
+    ["threads" "thread_dynamic_tools" "stage1_outputs" "thread_spawn_edges"]
+}
+
+# Copy rows that don't already exist (by primary key) from one App db into another.
+# Columns are read per-row so NULL cells are omitted (query db -p drops nulls), and the
+# column list is discovered dynamically so it survives Codex schema changes.
+def merge-app-db-table [local_db: string, backup_db: string, table: string] {
+    let cols = (open $backup_db | query db $"PRAGMA table_info\(($table)\)" | get name)
+    if ($cols | is-empty) {
+        return
+    }
+
+    for row in (open $backup_db | query db $"SELECT * FROM ($table)") {
+        let present = ($cols | where { |c| ($row | get $c) != null })
+        if ($present | is-empty) {
+            continue
+        }
+        let collist = ($present | str join ", ")
+        let placeholders = ($present | each { |_| "?" } | str join ", ")
+        let params = ($present | each { |c| $row | get $c })
+        open $local_db | query db $"INSERT OR IGNORE INTO ($table) \(($collist)\) VALUES \(($placeholders)\)" -p $params
+    }
+}
+
+# Place the backup's App db(s) into the local codex home. Replace mode (or a missing
+# local db) copies the file wholesale; otherwise merge thread rows so both machines'
+# sessions are preserved. Path remapping happens afterwards via run-remap.
+def restore-app-db [backup: string, codex_home: string, replace: bool] {
+    for backup_db in (find-app-db-files $backup) {
+        let base = ($backup_db | path basename)
+        let local_db = (join-path [$codex_home $base])
+
+        if $replace or (not ($local_db | path exists)) {
+            for suffix in ["" "-wal" "-shm"] {
+                let f = $"($local_db)($suffix)"
+                if ($f | path exists) {
+                    rm -r -f $f
+                }
+            }
+            cp $backup_db $local_db
+            for suffix in ["-wal" "-shm"] {
+                let extra = $"($backup_db)($suffix)"
+                if ($extra | path exists) {
+                    cp $extra $"($local_db)($suffix)"
+                }
+            }
+        } else {
+            for table in (app-db-tables) {
+                merge-app-db-table $local_db $backup_db $table
+            }
+        }
+    }
+}
+
 def copy-missing-tree-items [source_root: string, destination_root: string] {
     mkdir $destination_root
 
@@ -235,30 +329,32 @@ def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
         $files = ($files | append (find-jsonl-files $archived_dir))
     }
 
-    if ($files | length) == 0 {
-        return
-    }
-
-    if $dry_run {
-        print "Dry run - no files will be modified:"
-    }
-
-    mut remapped = 0
-    mut unchanged = 0
-    mut skipped = 0
-
-    for file in $files {
-        let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
-        if $result == "remapped" or $result == "would_remap" {
-            $remapped = $remapped + 1
-        } else if $result == "unchanged" {
-            $unchanged = $unchanged + 1
-        } else {
-            $skipped = $skipped + 1
+    if ($files | length) > 0 {
+        if $dry_run {
+            print "Dry run - no files will be modified:"
         }
+
+        mut remapped = 0
+        mut unchanged = 0
+        mut skipped = 0
+
+        for file in $files {
+            let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
+            if $result == "remapped" or $result == "would_remap" {
+                $remapped = $remapped + 1
+            } else if $result == "unchanged" {
+                $unchanged = $unchanged + 1
+            } else {
+                $skipped = $skipped + 1
+            }
+        }
+
+        print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
     }
 
-    print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
+    for db in (find-app-db-files $codex_home) {
+        remap-sqlite $db $codex_home $mappings $dry_run
+    }
 }
 
 def load-path-mappings [mapping_file: string] {
@@ -351,6 +447,34 @@ def normalize-path-for-platform [path: string, platform: string] {
     }
 }
 
+# Codex stores some Windows paths with the extended-length prefix (\\?\ or \\?\UNC\).
+# Strip it so prefix matching against clean mapping keys works.
+def strip-extended-prefix [path: string] {
+    if ($path | str starts-with '\\?\UNC\') {
+        '\\' + ($path | str substring 8..)
+    } else if ($path | str starts-with '\\?\') {
+        $path | str substring 4..
+    } else {
+        $path
+    }
+}
+
+# Apply the first matching mapping (mappings are pre-sorted longest-first) to a path
+# string. Returns the remapped path, or the original unchanged if nothing matches.
+def remap-path-string [path: string, mappings: list<any>] {
+    let stripped = (strip-extended-prefix $path)
+    mut result = $path
+    for mapping in $mappings {
+        if ($stripped | str starts-with $mapping.from) {
+            let suffix = ($stripped | str substring ($mapping.from | str length)..)
+            let joined = $"($mapping.to)($suffix)"
+            $result = (normalize-path-for-platform $joined $mapping.target_platform)
+            break
+        }
+    }
+    $result
+}
+
 def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     let raw = (open --raw $file_path)
     let all_lines = ($raw | lines)
@@ -371,15 +495,7 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
         return "skip"
     }
 
-    mut new_cwd = $old_cwd
-    for mapping in $mappings {
-        if ($old_cwd | str starts-with $mapping.from) {
-            let suffix = ($old_cwd | str substring ($mapping.from | str length)..)
-            let joined = $"($mapping.to)($suffix)"
-            $new_cwd = (normalize-path-for-platform $joined $mapping.target_platform)
-            break
-        }
-    }
+    let new_cwd = (remap-path-string $old_cwd $mappings)
 
     if $new_cwd == $old_cwd {
         return "unchanged"
@@ -404,8 +520,74 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     "remapped"
 }
 
+# Re-root an absolute Codex path (e.g. a stored rollout_path) onto the local codex
+# home, regardless of which machine wrote it. Splits on the ".codex" segment and
+# rejoins the suffix onto $codex_home, normalizing separators for this platform.
+def reroot-codex-path [stored: string, codex_home: string] {
+    let normalized = ($stored | str replace --all "\\" "/")
+    let parts = ($normalized | split row "/.codex/")
+
+    if ($parts | length) < 2 {
+        $stored
+    } else {
+        let suffix = ($parts | skip 1 | str join "/.codex/")
+        normalize-path-for-platform $"($codex_home)/($suffix)" (current-path-platform)
+    }
+}
+
+# Remap the Codex App's thread index. For every row in `threads`:
+#   cwd          -> remapped via path mappings (handles \\?\ prefixes)
+#   rollout_path -> re-rooted onto the local codex_home
+#   agent_path   -> remapped via path mappings when present
+def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_run: bool] {
+    if not ($db_path | path exists) {
+        return
+    }
+
+    let rows = (open $db_path | query db "SELECT id, cwd, rollout_path, agent_path FROM threads")
+
+    if $dry_run {
+        print "Dry run - sqlite threads will not be modified:"
+    }
+
+    mut remapped = 0
+    mut unchanged = 0
+
+    for row in $rows {
+        let new_cwd = (remap-path-string $row.cwd $mappings)
+        let new_rollout = (reroot-codex-path $row.rollout_path $codex_home)
+        let new_agent = if ($row.agent_path | is-empty) {
+            $row.agent_path
+        } else {
+            remap-path-string $row.agent_path $mappings
+        }
+
+        let changed = ($new_cwd != $row.cwd) or ($new_rollout != $row.rollout_path) or ($new_agent != $row.agent_path)
+
+        if not $changed {
+            $unchanged = $unchanged + 1
+            continue
+        }
+
+        if $dry_run {
+            print $"  thread ($row.id): cwd ($row.cwd) -> ($new_cwd)"
+            $remapped = $remapped + 1
+            continue
+        }
+
+        open $db_path | query db "UPDATE threads SET cwd = ?, rollout_path = ?, agent_path = ? WHERE id = ?" -p [$new_cwd $new_rollout $new_agent $row.id]
+        $remapped = $remapped + 1
+    }
+
+    print $"sqlite threads remapped: ($remapped), unchanged: ($unchanged)"
+}
+
 def main [] {
     print "Codex chat sync helper"
+    print ""
+    print "Backs up/restores sessions, archived_sessions, session_index.jsonl, and the"
+    print "App thread index state_*.sqlite. Restore remaps project cwd (incl. \\\\?\\ paths)"
+    print "via path-mapping.toml and re-roots rollout_path onto the local codex home."
     print ""
     print "Commands:"
     print "  nu codex-chat.nu backup"
@@ -445,6 +627,7 @@ def "main backup" [
     cp -r $sessions (join-path [$destination "sessions"])
     cp -r $archived_sessions (join-path [$destination "archived_sessions"])
     cp $index (join-path [$destination "session_index.jsonl"])
+    backup-app-db $codex_home $destination
 
     if $zip {
         let zip_path = $"($destination).zip"
@@ -513,6 +696,9 @@ def "main restore" [
         copy-if-exists $local_sessions (join-path [$safety_backup "sessions"])
         copy-if-exists $local_archived_sessions (join-path [$safety_backup "archived_sessions"])
         copy-if-exists $local_index (join-path [$safety_backup "session_index.jsonl"])
+        for db in (find-app-db-files $codex_home) {
+            copy-if-exists $db (join-path [$safety_backup ($db | path basename)])
+        }
         print $"Safety backup created: ($safety_backup)"
 
         if $merge_folders {
@@ -542,6 +728,9 @@ def "main restore" [
 
             merge-index-lines $backup_index $local_index true
         }
+
+        restore-app-db $backup $codex_home $replace_folders
+
         print $"Restore completed into: ($codex_home)"
 
         let mapping_file = (default-path-mapping-file)
