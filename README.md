@@ -1,211 +1,209 @@
 # Codex Chat Backup & Sync
 
-Backup, restore, and sync [Codex App](https://codex.openai.com/) conversation data across machines. Two implementations are provided: **PowerShell** (Windows) and **Nushell** (cross-platform).
+Nushell helper for backing up, restoring, and moving Codex App conversation data between machines.
 
-Only conversation files are backed up -- the scripts intentionally skip the rest of `~/.codex`.
+The script focuses on conversation state, not the whole `~/.codex` directory. It copies the files needed for chat history while avoiding auth tokens, logs, temporary files, and sandbox data.
 
-| File | Description |
-|------|-------------|
-| `sessions/` | Active conversation sessions |
-| `archived_sessions/` | Archived conversations |
-| `session_index.jsonl` | Session metadata index |
+## What Gets Synced
 
-## Scripts
+`codex-chat.nu backup` stores:
 
-| Script | Description |
-|--------|-------------|
-| `Backup-CodexChat.ps1` | Create a timestamped backup |
-| `Restore-CodexChat.ps1` | Restore from a backup (creates a safety backup first) |
-| `Merge-CodexSessionIndex.ps1` | Append missing index entries without overwriting |
-| `Compress-CodexChatBackups.ps1` | Zip backup folders older than N days |
-| `codex-chat.nu` | Nushell equivalent with `backup`, `restore`, `merge-index`, `remap-paths`, `compress` subcommands |
-| `path-mapping.toml` | Path mapping config for cross-platform migration |
+| Path | Purpose |
+|------|---------|
+| `sessions/` | Active rollout JSONL conversation files |
+| `archived_sessions/` | Archived rollout JSONL conversation files |
+| `session_index.jsonl` | Thread list metadata used by Codex/CLI history |
+| `state_*.sqlite` | Codex App thread index/state database, copied with WAL checkpointing |
+
+Do not sync the entire `~/.codex` directory. Files such as `auth.json`, `config.toml`, logs, sqlite logs, temp folders, and sandbox folders should remain local to each machine.
+
+## Files In This Repo
+
+| File | Purpose |
+|------|---------|
+| `codex-chat.nu` | Main backup, restore, remap, discovery, and compression script |
+| `path-mapping.toml` | Cross-platform project path mapping |
+| `codex-chat-sync/` | Git-ignored backup output directory |
+| `AGENTS.md` | Repository guidance for coding agents |
+| `CLAUDE.md` | Additional implementation notes |
+
+## Requirements
+
+- Nushell installed as `nu`
+- Codex App closed before backup or restore
+- `tar` on Windows or `zip`/`unzip` on macOS/Linux when using zip backups
+
+The script refuses to run while a Codex process is detected unless you pass `--ignore-running-codex`.
 
 ## Quick Start
 
-Close Codex App before running any script.
-
-### Backup
-
-```powershell
-# PowerShell
-.\Backup-CodexChat.ps1
-
-# With zip archive
-.\Backup-CodexChat.ps1 -Zip
-```
+Create a folder backup:
 
 ```nu
-# Nushell
 nu codex-chat.nu backup
+```
 
-# With zip archive
+Create a zip backup:
+
+```nu
 nu codex-chat.nu backup --zip
 ```
 
-### Restore
-
-Restore accepts both directories and `.zip` archives as `--backup-path`.
-
-```powershell
-# PowerShell -- default (fails if destination folders exist)
-.\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000"
-
-# From a zip archive
-.\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000.zip" -ReplaceFolders
-
-# Merge missing files into existing data
-.\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000" -MergeFolders
-
-# Replace existing folders entirely
-.\Restore-CodexChat.ps1 -BackupPath ".\codex-chat-sync\20260528-103000" -ReplaceFolders
-```
+Restore from a backup folder and only add missing files:
 
 ```nu
-# Nushell
-nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --merge-folders
-nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000 --replace-folders
-
-# From a zip archive
-nu codex-chat.nu restore --backup-path ./codex-chat-sync/20260528-103000.zip --replace-folders
+nu codex-chat.nu restore --backup-path ./codex-chat-sync/YYYYMMDD-HHMMSS --merge-folders
 ```
 
-A safety backup (`before-restore-*`) is always created before any restore operation.
+Restore from a zip and replace local chat folders:
+
+```nu
+nu codex-chat.nu restore --backup-path ./codex-chat-sync/YYYYMMDD-HHMMSS.zip --replace-folders
+```
+
+Restart Codex App after restore.
+
+## Backup Layout
+
+Backups are created under `codex-chat-sync/` next to the script:
+
+```text
+codex-chat-sync/
+  20260528-103000/
+    sessions/
+    archived_sessions/
+    session_index.jsonl
+    state_5.sqlite
+  20260528-103000.zip
+  before-restore-20260528-120000/
+    ...
+```
+
+Restore always creates a `before-restore-*` safety backup before changing local Codex data.
 
 ## Restore Modes
 
-| Mode | Folders | Index |
-|------|---------|-------|
-| Default | Fails if destination folders already exist | Merge (append deduplicated lines) |
-| `-MergeFolders` / `--merge-folders` | Copies only files that don't already exist locally | Merge |
-| `-ReplaceFolders` / `--replace-folders` | Deletes existing folders and replaces them from backup | Replace entirely |
+| Mode | Chat folders | `session_index.jsonl` |
+|------|--------------|-----------------------|
+| default | Fails if destination folders already exist | Merge deduplicated lines |
+| `--merge-folders` | Copies only missing files | Merge deduplicated lines |
+| `--replace-folders` | Replaces `sessions/` and `archived_sessions/` | Replace entirely |
 
-## Cross-Platform Migration
+For most cross-machine syncs, use `--merge-folders` when combining histories and `--replace-folders` when the backup should become the target machine's source of truth.
 
-Session files store the project path (`cwd`) from the originating machine. When migrating between macOS and Windows (or vice versa), the Codex app won't display restored conversations because the paths don't match.
+## App SQLite Handling
 
-The Nushell `restore` command automatically remaps paths after restoring if `path-mapping.toml` exists alongside the script. You can also run `remap-paths` manually at any time.
+Codex App also keeps a thread index in `state_*.sqlite`. This script backs it up, but restore does not replace another machine's sqlite file wholesale.
 
-### 1. Configure path mappings
+Instead, restore merges selected thread-related tables into the local App database:
 
-Edit `path-mapping.toml`. Each `[paths.<name>]` table describes the same path
-prefix on each machine:
+```text
+threads
+thread_dynamic_tools
+stage1_outputs
+thread_spawn_edges
+```
+
+This avoids breaking Codex App migrations, which can be build-specific. If a local `state_*.sqlite` does not exist yet, launch Codex once to create it, then run restore again.
+
+## Path Mapping
+
+Session files and App thread rows store project paths in `cwd`. A backup written on macOS may contain paths like `/Users/you/...`, while Windows needs `D:\...`. Without remapping, restored threads may exist on disk but not appear under the expected project.
+
+Configure `path-mapping.toml`:
 
 ```toml
 [paths.projectfiles]
 windows = 'D:\ProjectFiles'
 macos = "/Users/yiqin/Documents/ProjectFiles"
 
-[paths.pythonprojects]
-windows = 'D:\PythonProjects'
-macos = "/Users/yiqin/Documents/PythonProjects"
+[paths.phd-paper]
+windows = 'E:\LaTeX\paper\phd_paper\draft'
+macos = "/Users/yiqin/Documents/LaTeX/paper/phd_paper/draft"
 ```
 
-- The current OS decides the target path automatically.
-- On Windows, macOS/Linux paths are mapped to `windows`.
-- On macOS, Windows/Linux paths are mapped to `macos`.
-- Longest prefix matches first
-- You may also add `linux` when needed.
-- Remove platform keys with no local equivalent; those sessions keep their original paths.
-- Windows paths should use TOML single-quoted strings so backslashes do not need escaping.
+Windows paths should use TOML single-quoted strings so backslashes do not need escaping.
 
-### 2. Run manually (optional)
-
-If you need to preview or re-run the remapping independently:
+Restore automatically runs path remapping when `path-mapping.toml` exists. You can also run it manually:
 
 ```nu
-# Preview changes without modifying files
 nu codex-chat.nu remap-paths --dry-run
-
-# Apply the remapping
 nu codex-chat.nu remap-paths
-
-# Use a custom mapping file
-nu codex-chat.nu remap-paths --mapping-file /path/to/path-mapping.toml
 ```
 
-Legacy JSONL mappings are still accepted when passed explicitly with
-`--mapping-file`.
+## Discover Missing Mappings
 
-### Full migration workflow
+Use `discover-paths` to scan current Codex records and find project paths not covered by `path-mapping.toml`:
 
-```bash
-# On source machine: backup
-nu codex-chat.nu backup --zip
-
-# Transfer the zip via OneDrive / Dropbox / Syncthing / USB
-
-# On target machine: restore (auto-remaps if path-mapping.toml exists)
-nu codex-chat.nu restore --backup-path ./codex-chat-sync/YYYYMMDD-HHMMSS.zip --replace-folders
-
-# Restart Codex App
+```nu
+nu codex-chat.nu discover-paths
 ```
+
+Append suggested TOML blocks with placeholders:
+
+```nu
+nu codex-chat.nu discover-paths --write
+```
+
+Then edit the generated `FILL_IN` values before running restore/remap again.
 
 ## Merge Index Only
 
-Append missing session index entries without touching session folders:
-
-```powershell
-.\Merge-CodexSessionIndex.ps1 `
-  -SourceIndex ".\codex-chat-sync\20260528-103000\session_index.jsonl" `
-  -DestinationIndex "$HOME\.codex\session_index.jsonl"
-```
+Append missing index entries without touching session folders:
 
 ```nu
-nu codex-chat.nu merge-index --source-index ./codex-chat-sync/20260528-103000/session_index.jsonl
+nu codex-chat.nu merge-index --source-index ./codex-chat-sync/YYYYMMDD-HHMMSS/session_index.jsonl
 ```
+
+Use `--destination-index` to target a non-default Codex home, and `--create-destination` if the destination file does not exist.
 
 ## Compress Old Backups
 
-Zip backup folders older than 30 days (default):
-
-```powershell
-.\Compress-CodexChatBackups.ps1
-
-# Remove original folders after zipping
-.\Compress-CodexChatBackups.ps1 -RemoveOriginal
-```
+Zip backup folders older than 30 days:
 
 ```nu
 nu codex-chat.nu compress
+```
+
+Remove original folders after zipping:
+
+```nu
 nu codex-chat.nu compress --remove-original
 ```
 
-## Custom Codex Home
-
-Both implementations default to `~/.codex`. Override with:
-
-```powershell
-.\Backup-CodexChat.ps1 -CodexHome "D:\Somewhere\.codex"
-```
+Change the age threshold:
 
 ```nu
-nu codex-chat.nu backup --codex-home /path/to/.codex
+nu codex-chat.nu compress --older-than-days 7
 ```
 
-## Backup Storage Layout
+## Custom Locations
 
-Backups are stored in `codex-chat-sync/` next to the scripts, using timestamped directories with collision avoidance:
+All commands default to `~/.codex` and `./codex-chat-sync`. Override them when testing or using a nonstandard setup:
 
-```
-codex-chat-sync/
-  20260528-103000/
-    sessions/
-    archived_sessions/
-    session_index.jsonl
-  20260528-103000.zip
-  before-restore-20260528-120000/
-    ...
+```nu
+nu codex-chat.nu backup --codex-home ./fixtures/codex-home --backup-root ./tmp/backups
+nu codex-chat.nu restore --backup-path ./tmp/backups/20260528-103000 --codex-home ./fixtures/codex-home --merge-folders
+nu codex-chat.nu remap-paths --codex-home ./fixtures/codex-home --mapping-file ./path-mapping.toml --dry-run
 ```
 
-## Syncing Across Machines
+Prefer disposable folders when validating restore behavior.
 
-Sync the `codex-chat-sync/` directory using OneDrive, Dropbox, Syncthing, or a private Git repository. Do **not** sync the entire `~/.codex` directory.
+## Recommended Sync Workflow
 
-## Safety
+1. Close Codex App on the source machine.
+2. Run `nu codex-chat.nu backup --zip`.
+3. Sync or copy the zip via OneDrive, Dropbox, Syncthing, USB, or a private storage location.
+4. Close Codex App on the target machine.
+5. Run restore with `--merge-folders` or `--replace-folders`.
+6. Restart Codex App.
+7. If threads are missing, run `nu codex-chat.nu discover-paths` and update `path-mapping.toml`.
 
-- Scripts check for a running Codex process and refuse to proceed unless `--ignore-running-codex` / `-IgnoreRunningCodex` is passed.
-- Restore always creates a safety backup before modifying local data.
+## Safety Notes
+
+- `codex-chat-sync/` is intentionally git-ignored.
+- Restore creates a safety backup before writing.
 - Index merging is append-only and deduplicated by exact line equality.
-- `-ReplaceFolders` replaces the index entirely (no dangling entries from the previous state).
-- Timestamped paths include a counter suffix to avoid collisions.
+- `state_*.sqlite` is merged row-by-row, not copied over another machine's database.
+- Path remapping updates rollout first-line `payload.cwd` values and App sqlite thread paths.
+- Archived sessions are backed up and restored along with active sessions.
