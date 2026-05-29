@@ -34,8 +34,9 @@ nu codex-chat.nu compress
 - Codex must be closed before backup/restore (enforced by process check, overridable with `--ignore-running-codex`).
 - Restore always creates a safety backup first, stored under `codex-chat-sync/before-restore-*`.
 - Index merge is append-only and deduplicated by exact line equality.
-- Three restore modes: default (fail if destination exists), `--merge-folders` (copy only missing files / merge sqlite thread rows), `--replace-folders` (delete and replace, sqlite included).
-- **Two indexes, one source of truth per client**: the CLI reads `session_index.jsonl`; the App reads `state_*.sqlite`. Both are backed up and restored so either client sees the sessions.
+- Three restore modes apply to the session folders/index: default (fail if destination exists), `--merge-folders` (copy only missing files), `--replace-folders` (delete and replace).
+- **The App db is always row-merged, never file-replaced** — regardless of the folder mode. `state_*.sqlite` carries build-specific `_sqlx_migrations` checksums; copying a foreign db makes Codex refuse to launch (`migration N ... has been modified`). The merge inserts thread rows (intersecting columns present in both dbs) into the local db, preserving its schema and migrations. If no local db exists, restore skips it and asks the user to launch Codex once to create it first.
+- **Two indexes, one source of truth per client**: the CLI reads `session_index.jsonl`; the App reads `state_*.sqlite`. Both are kept in sync so either client sees the sessions.
 - **Path remapping on restore**: `cwd` (in rollout JSONL and in `threads.cwd`) is remapped via `path-mapping.toml`; Windows extended-length `\\?\` prefixes are stripped before matching. `threads.rollout_path` is re-rooted onto the local codex home (split on the `.codex` segment), independent of the mapping file.
 - The sqlite is backed up by checkpointing the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) then copying the single `.sqlite`; on checkpoint failure it falls back to copying `-wal`/`-shm` too.
 - No test suite exists. Validate changes by running against a throwaway `--codex-home`, never the live `~/.codex`.

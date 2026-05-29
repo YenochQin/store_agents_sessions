@@ -158,10 +158,12 @@ def app-db-tables [] {
 }
 
 # Copy rows that don't already exist (by primary key) from one App db into another.
-# Columns are read per-row so NULL cells are omitted (query db -p drops nulls), and the
-# column list is discovered dynamically so it survives Codex schema changes.
+# Only columns present in BOTH databases are used, so the merge survives schema drift
+# between Codex builds. NULL cells are omitted per row (query db -p drops nulls).
 def merge-app-db-table [local_db: string, backup_db: string, table: string] {
-    let cols = (open $backup_db | query db $"PRAGMA table_info\(($table)\)" | get name)
+    let backup_cols = (open $backup_db | query db $"PRAGMA table_info\(($table)\)" | get name)
+    let local_cols = (open $local_db | query db $"PRAGMA table_info\(($table)\)" | get name)
+    let cols = ($backup_cols | where { |c| $c in $local_cols })
     if ($cols | is-empty) {
         return
     }
@@ -178,32 +180,23 @@ def merge-app-db-table [local_db: string, backup_db: string, table: string] {
     }
 }
 
-# Place the backup's App db(s) into the local codex home. Replace mode (or a missing
-# local db) copies the file wholesale; otherwise merge thread rows so both machines'
-# sessions are preserved. Path remapping happens afterwards via run-remap.
-def restore-app-db [backup: string, codex_home: string, replace: bool] {
+# Bring the backup's App threads into the local codex home. The App db is NEVER copied
+# wholesale across machines: its _sqlx_migrations checksums are build-specific, so a
+# foreign file makes Codex refuse to launch ("migration N ... has been modified"). When
+# a local db exists we merge thread rows into it (preserving the local schema and
+# migrations). When it does not, we skip and tell the user to let Codex create it first.
+# Path remapping happens afterwards via run-remap.
+def restore-app-db [backup: string, codex_home: string] {
     for backup_db in (find-app-db-files $backup) {
         let base = ($backup_db | path basename)
         let local_db = (join-path [$codex_home $base])
 
-        if $replace or (not ($local_db | path exists)) {
-            for suffix in ["" "-wal" "-shm"] {
-                let f = $"($local_db)($suffix)"
-                if ($f | path exists) {
-                    rm -r -f $f
-                }
-            }
-            cp $backup_db $local_db
-            for suffix in ["-wal" "-shm"] {
-                let extra = $"($backup_db)($suffix)"
-                if ($extra | path exists) {
-                    cp $extra $"($local_db)($suffix)"
-                }
-            }
-        } else {
+        if ($local_db | path exists) {
             for table in (app-db-tables) {
                 merge-app-db-table $local_db $backup_db $table
             }
+        } else {
+            print $"No local ($base) found; skipping App db restore. Launch Codex once to create it, then re-run restore to merge threads. \(Copying the backup db would break Codex's migration check.\)"
         }
     }
 }
@@ -729,7 +722,7 @@ def "main restore" [
             merge-index-lines $backup_index $local_index true
         }
 
-        restore-app-db $backup $codex_home $replace_folders
+        restore-app-db $backup $codex_home
 
         print $"Restore completed into: ($codex_home)"
 
