@@ -10,7 +10,7 @@ macos = "/Users/yiqin/Documents/ProjectFiles/llm-wiki"
 
 [paths.graspkit-workspace]
 windows = 'D:\ProjectFiles\GraspKit-Workspace'
-macos = "/Users/yiqin/Documents/ProjectFiles/GraspKit-Workspace"  # CONFIRM
+macos = "/Users/yiqin/Documents/PythonProjects/GraspKit-Workspace"  # CONFIRM
 
 [paths.store-agents-sessions]
 windows = 'D:\ProjectFiles\store_agents_sessions'
@@ -18,7 +18,7 @@ macos = "/Users/yiqin/Documents/ProjectFiles/store_agents_sessions"  # CONFIRM
 
 [paths.graspkit-tools]
 windows = 'D:\PythonProjects\graspkit-tools'
-macos = "/Users/yiqin/Documents/PythonProjects/graspkit-tools"  # CONFIRM
+macos = "/Users/yiqin/Documents/PythonProjects/GraspKit-Workspace/GraspKit-Tools"  # CONFIRM
 
 [paths.phd-paper-draft]
 windows = 'E:\LaTeX\paper\phd_paper\draft'
