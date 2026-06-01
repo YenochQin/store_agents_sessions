@@ -157,18 +157,106 @@ def app-db-tables [] {
     ["threads" "thread_dynamic_tools" "stage1_outputs" "thread_spawn_edges"]
 }
 
+def collect-rollout-ids [roots: list<string>] {
+    mut ids = []
+
+    for root in $roots {
+        if not ($root | path exists) {
+            continue
+        }
+
+        for file in (find-jsonl-files $root) {
+            let id = (try {
+                open --raw ($file | into string) | lines | get 0 | from json | get payload.id?
+            } catch {
+                null
+            })
+
+            if ($id != null) and (not ($id | into string | is-empty)) {
+                $ids = ($ids | append ($id | into string))
+            }
+        }
+    }
+
+    $ids | uniq
+}
+
+def app-db-thread-id-column [table: string] {
+    if $table == "threads" {
+        "id"
+    } else if $table == "thread_spawn_edges" {
+        "child_thread_id"
+    } else {
+        "thread_id"
+    }
+}
+
+def sql-placeholders [count: int] {
+    1..$count | each { |_| "?" } | str join ", "
+}
+
+def app-db-table-columns [db: string, table: string] {
+    try {
+        open $db | query db $"PRAGMA table_info\(($table)\)" | get name
+    } catch {
+        []
+    }
+}
+
+def delete-app-db-rows-not-in-threads [local_db: string, table: string, thread_ids: list<string>] {
+    if ($thread_ids | is-empty) {
+        return
+    }
+
+    let local_cols = (app-db-table-columns $local_db $table)
+    if ($local_cols | is-empty) {
+        return
+    }
+
+    let placeholders = (sql-placeholders ($thread_ids | length))
+    if $table == "thread_spawn_edges" {
+        if ("parent_thread_id" not-in $local_cols) or ("child_thread_id" not-in $local_cols) {
+            return
+        }
+        let params = ($thread_ids | append $thread_ids)
+        open $local_db | query db $"DELETE FROM ($table) WHERE parent_thread_id NOT IN \(($placeholders)\) OR child_thread_id NOT IN \(($placeholders)\)" -p $params
+    } else {
+        let col = (app-db-thread-id-column $table)
+        if $col not-in $local_cols {
+            return
+        }
+        open $local_db | query db $"DELETE FROM ($table) WHERE ($col) NOT IN \(($placeholders)\)" -p $thread_ids
+    }
+}
+
 # Copy rows that don't already exist (by primary key) from one App db into another.
 # Only columns present in BOTH databases are used, so the merge survives schema drift
 # between Codex builds. NULL cells are omitted per row (query db -p drops nulls).
-def merge-app-db-table [local_db: string, backup_db: string, table: string] {
-    let backup_cols = (open $backup_db | query db $"PRAGMA table_info\(($table)\)" | get name)
-    let local_cols = (open $local_db | query db $"PRAGMA table_info\(($table)\)" | get name)
+def merge-app-db-table [local_db: string, backup_db: string, table: string, thread_ids: list<string>] {
+    let backup_cols = (app-db-table-columns $backup_db $table)
+    let local_cols = (app-db-table-columns $local_db $table)
     let cols = ($backup_cols | where { |c| $c in $local_cols })
     if ($cols | is-empty) {
         return
     }
 
+    let thread_col = (app-db-thread-id-column $table)
+    if $thread_col not-in $backup_cols {
+        return
+    }
+
     for row in (open $backup_db | query db $"SELECT * FROM ($table)") {
+        let thread_id = ($row | get $thread_col)
+        if ($thread_id == null) or (($thread_id | into string) not-in $thread_ids) {
+            continue
+        }
+        if $table == "thread_spawn_edges" {
+            let parent_id = ($row | get parent_thread_id)
+            if ($parent_id == null) or (($parent_id | into string) not-in $thread_ids) {
+                continue
+            }
+        }
+
         let present = ($cols | where { |c| ($row | get $c) != null })
         if ($present | is-empty) {
             continue
@@ -186,14 +274,25 @@ def merge-app-db-table [local_db: string, backup_db: string, table: string] {
 # a local db exists we merge thread rows into it (preserving the local schema and
 # migrations). When it does not, we skip and tell the user to let Codex create it first.
 # Path remapping happens afterwards via run-remap.
-def restore-app-db [backup: string, codex_home: string] {
+def restore-app-db [backup: string, codex_home: string, thread_ids: list<string>, replace_existing: bool] {
+    if ($thread_ids | is-empty) {
+        print "No rollout thread ids found in backup; skipping App db restore."
+        return
+    }
+
     for backup_db in (find-app-db-files $backup) {
         let base = ($backup_db | path basename)
         let local_db = (join-path [$codex_home $base])
 
         if ($local_db | path exists) {
+            if $replace_existing {
+                for table in ((app-db-tables) | reverse) {
+                    delete-app-db-rows-not-in-threads $local_db $table $thread_ids
+                }
+            }
+
             for table in (app-db-tables) {
-                merge-app-db-table $local_db $backup_db $table
+                merge-app-db-table $local_db $backup_db $table $thread_ids
             }
         } else {
             print $"No local ($base) found; skipping App db restore. Launch Codex once to create it, then re-run restore to merge threads. \(Copying the backup db would break Codex's migration check.\)"
@@ -756,6 +855,7 @@ def "main restore" [
         let backup_sessions = (join-path [$backup "sessions"])
         let backup_archived_sessions = (join-path [$backup "archived_sessions"])
         let backup_index = (join-path [$backup "session_index.jsonl"])
+        let backup_thread_ids = (collect-rollout-ids [$backup_sessions $backup_archived_sessions])
 
         assert-path $backup_sessions "backup sessions"
         assert-path $backup_archived_sessions "backup archived_sessions"
@@ -814,7 +914,7 @@ def "main restore" [
             merge-index-lines $backup_index $local_index true
         }
 
-        restore-app-db $backup $codex_home
+        restore-app-db $backup $codex_home $backup_thread_ids $replace_folders
 
         print $"Restore completed into: ($codex_home)"
 

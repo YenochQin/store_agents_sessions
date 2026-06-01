@@ -91,6 +91,8 @@ Restore always creates a `before-restore-*` safety backup before changing local 
 
 For most cross-machine syncs, use `--merge-folders` when combining histories and `--replace-folders` when the backup should become the target machine's source of truth.
 
+With `--replace-folders`, the App sqlite merge is also narrowed to thread ids that still have rollout files in the backup. Old local App thread rows are removed before the backup rows are merged, so the UI state matches the replaced chat folders instead of retaining stale projects from the target machine.
+
 ## App SQLite Handling
 
 Codex App also keeps a thread index in `state_*.sqlite`. This script backs it up, but restore does not replace another machine's sqlite file wholesale.
@@ -103,6 +105,8 @@ thread_dynamic_tools
 stage1_outputs
 thread_spawn_edges
 ```
+
+Only thread ids that exist in the backup's `sessions/` or `archived_sessions/` rollout files are merged. This prevents stale App-only rows from making old projects reappear after a folder replacement.
 
 This avoids breaking Codex App migrations, which can be build-specific. If a local `state_*.sqlite` does not exist yet, launch Codex once to create it, then run restore again.
 

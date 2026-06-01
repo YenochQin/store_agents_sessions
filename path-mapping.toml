@@ -16,6 +16,10 @@ macos = "/Users/yiqin/Documents/PythonProjects/GraspKit-Workspace"  # CONFIRM
 windows = 'D:\ProjectFiles\store_agents_sessions'
 macos = "/Users/yiqin/Documents/ProjectFiles/store_agents_sessions"  # CONFIRM
 
+[paths.codex-documents]
+windows = 'C:\Users\Yenoc\Documents\Codex'
+macos = "/Users/yiqin/Documents/Codex"
+
 [paths.graspkit-tools]
 windows = 'D:\PythonProjects\graspkit-tools'
 macos = "/Users/yiqin/Documents/PythonProjects/GraspKit-Workspace/GraspKit-Tools"  # CONFIRM
