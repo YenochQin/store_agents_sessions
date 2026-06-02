@@ -518,21 +518,31 @@ def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
         }
 
         mut remapped = 0
-        mut unchanged = 0
+        mut already_local = 0
+        mut no_match = 0
         mut skipped = 0
 
         for file in $files {
             let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
             if $result == "remapped" or $result == "would_remap" {
                 $remapped = $remapped + 1
-            } else if $result == "unchanged" {
-                $unchanged = $unchanged + 1
+            } else if $result == "already_local" {
+                $already_local = $already_local + 1
+            } else if $result == "no_match" {
+                $no_match = $no_match + 1
             } else {
                 $skipped = $skipped + 1
             }
         }
 
-        print $"Remapped: ($remapped), Unchanged: ($unchanged), Skipped: ($skipped)"
+        mut summary = $"Remapped: ($remapped), Already local: ($already_local)"
+        if $no_match > 0 {
+            $summary = $summary + $", No mapping matched: ($no_match)"
+        }
+        if $skipped > 0 {
+            $summary = $summary + $", Skipped \(no cwd\): ($skipped)"
+        }
+        print $summary
     }
 
     for db in (find-app-db-files $codex_home) {
@@ -681,7 +691,12 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     let new_cwd = (remap-path-string $old_cwd $mappings)
 
     if $new_cwd == $old_cwd {
-        return "unchanged"
+        let stripped = (strip-extended-prefix $old_cwd)
+        if ($mappings | where { |m| $stripped | str starts-with $m.to } | length) > 0 {
+            return "already_local"
+        } else {
+            return "no_match"
+        }
     }
 
     if $dry_run {
@@ -734,7 +749,8 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
     }
 
     mut remapped = 0
-    mut unchanged = 0
+    mut already_local = 0
+    mut no_match = 0
 
     for row in $rows {
         let new_cwd = (remap-path-string $row.cwd $mappings)
@@ -748,7 +764,12 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
         let changed = ($new_cwd != $row.cwd) or ($new_rollout != $row.rollout_path) or ($new_agent != $row.agent_path)
 
         if not $changed {
-            $unchanged = $unchanged + 1
+            let stripped = (strip-extended-prefix $row.cwd)
+            if ($mappings | where { |m| $stripped | str starts-with $m.to } | length) > 0 {
+                $already_local = $already_local + 1
+            } else {
+                $no_match = $no_match + 1
+            }
             continue
         }
 
@@ -762,7 +783,11 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
         $remapped = $remapped + 1
     }
 
-    print $"sqlite threads remapped: ($remapped), unchanged: ($unchanged)"
+    mut summary = $"sqlite threads — remapped: ($remapped), already local: ($already_local)"
+    if $no_match > 0 {
+        $summary = $summary + $", no mapping matched: ($no_match)"
+    }
+    print $summary
 }
 
 def main [] {
