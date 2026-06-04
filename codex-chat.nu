@@ -1,6 +1,7 @@
 #!/usr/bin/env nu
 
 const SYNC_DIR_NAME = "codex-chat-sync"
+const BACKUP_DIR_NAME = "codex-chat-backup"
 
 def script-dir [] {
     let file_pwd = ($env.FILE_PWD? | default null)
@@ -22,6 +23,10 @@ def default-codex-home [] {
 
 def default-sync-root [] {
     join-path [(script-dir) $SYNC_DIR_NAME]
+}
+
+def default-backup-root [] {
+    join-path [(script-dir) $BACKUP_DIR_NAME]
 }
 
 def default-path-mapping-file [] {
@@ -520,16 +525,20 @@ def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
         mut remapped = 0
         mut already_local = 0
         mut no_match = 0
+        mut no_match_paths = []
         mut skipped = 0
 
         for file in $files {
             let result = (remap-cwd-in-file ($file | into string) $mappings $dry_run)
-            if $result == "remapped" or $result == "would_remap" {
+            if $result.status == "remapped" or $result.status == "would_remap" {
                 $remapped = $remapped + 1
-            } else if $result == "already_local" {
+            } else if $result.status == "already_local" {
                 $already_local = $already_local + 1
-            } else if $result == "no_match" {
+            } else if $result.status == "no_match" {
                 $no_match = $no_match + 1
+                if not ($result.cwd in $no_match_paths) {
+                    $no_match_paths = ($no_match_paths | append $result.cwd)
+                }
             } else {
                 $skipped = $skipped + 1
             }
@@ -543,6 +552,12 @@ def run-remap [codex_home: string, mapping_file: string, dry_run: bool] {
             $summary = $summary + $", Skipped \(no cwd\): ($skipped)"
         }
         print $summary
+        if ($no_match_paths | length) > 0 {
+            print "  Unmatched paths:"
+            for p in $no_match_paths {
+                print $"    ($p)"
+            }
+        }
     }
 
     for db in (find-app-db-files $codex_home) {
@@ -673,19 +688,19 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     let all_lines = ($raw | lines)
 
     if ($all_lines | length) == 0 {
-        return "skip"
+        return {status: "skip", cwd: ""}
     }
 
     let first_record = try {
         $all_lines | get 0 | from json
     } catch {
-        return "skip"
+        return {status: "skip", cwd: ""}
     }
 
     let old_cwd = try {
         $first_record.payload.cwd
     } catch {
-        return "skip"
+        return {status: "skip", cwd: ""}
     }
 
     let new_cwd = (remap-path-string $old_cwd $mappings)
@@ -693,15 +708,15 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     if $new_cwd == $old_cwd {
         let stripped = (strip-extended-prefix $old_cwd)
         if ($mappings | where { |m| $stripped | str starts-with $m.to } | length) > 0 {
-            return "already_local"
+            return {status: "already_local", cwd: $old_cwd}
         } else {
-            return "no_match"
+            return {status: "no_match", cwd: $old_cwd}
         }
     }
 
     if $dry_run {
         print $"  ($file_path | path basename): ($old_cwd) -> ($new_cwd)"
-        return "would_remap"
+        return {status: "would_remap", cwd: $old_cwd}
     }
 
     let new_first_line = ($first_record | upsert payload.cwd $new_cwd | to json --raw)
@@ -715,7 +730,7 @@ def remap-cwd-in-file [file_path: string, mappings: list<any>, dry_run: bool] {
     }
 
     $final_content | save --force $file_path
-    "remapped"
+    {status: "remapped", cwd: $old_cwd}
 }
 
 # Re-root an absolute Codex path (e.g. a stored rollout_path) onto the local codex
@@ -751,6 +766,7 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
     mut remapped = 0
     mut already_local = 0
     mut no_match = 0
+    mut no_match_paths = []
 
     for row in $rows {
         let new_cwd = (remap-path-string $row.cwd $mappings)
@@ -769,6 +785,9 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
                 $already_local = $already_local + 1
             } else {
                 $no_match = $no_match + 1
+                if not ($row.cwd in $no_match_paths) {
+                    $no_match_paths = ($no_match_paths | append $row.cwd)
+                }
             }
             continue
         }
@@ -788,6 +807,12 @@ def remap-sqlite [db_path: string, codex_home: string, mappings: list<any>, dry_
         $summary = $summary + $", no mapping matched: ($no_match)"
     }
     print $summary
+    if ($no_match_paths | length) > 0 {
+        print "  Unmatched cwd paths:"
+        for p in $no_match_paths {
+            print $"    ($p)"
+        }
+    }
 }
 
 def main [] {
@@ -866,7 +891,7 @@ def "main restore" [
 
     let backup_expanded = ($backup_path | path expand)
     let codex_home = (if $codex_home == null { default-codex-home } else { $codex_home } | path expand)
-    let safety_root = (if $safety_backup_root == null { default-sync-root } else { $safety_backup_root } | path expand)
+    let safety_root = (if $safety_backup_root == null { default-backup-root } else { $safety_backup_root } | path expand)
 
     if (codex-running) and (not $ignore_running_codex) {
         error make { msg: "Codex appears to be running. Close Codex App before restore, or rerun with --ignore-running-codex if you accept the risk." }

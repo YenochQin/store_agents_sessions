@@ -27,3 +27,11 @@ macos = "/Users/yiqin/Documents/PythonProjects/GraspKit-Workspace/GraspKit-Tools
 [paths.phd-paper-draft]
 windows = 'E:\LaTeX\paper\phd_paper\draft'
 macos = "/Users/yiqin/Documents/LatexDocuments/paper/phd_paper/draft"
+
+[paths.Auto-claude-code-research-in-sleep]
+windows = 'D:\ProjectFiles\Auto-claude-code-research-in-sleep'
+macos = "/Users/yiqin/Documents/ProjectFiles/Auto-claude-code-research-in-sleep"
+
+[paths.paper_project]
+windows = 'D:\ProjectFiles\paper_project'
+macos = "/Users/yiqin/Documents/ProjectFiles/paper_project"

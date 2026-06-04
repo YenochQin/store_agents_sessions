@@ -1,3 +1,4 @@
 # Local Codex chat backups and sync payloads.
 # Keep scripts/docs in Git, but do not commit conversation backup data.
 /codex-chat-sync/
+codex-chat-backup/*
